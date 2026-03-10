@@ -1,13 +1,15 @@
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::collections::{HashMap, VecDeque};
-use petgraph::graph::DiGraph;
-use petgraph::algo::toposort;
-use serde::{Deserialize, Serialize};
+
 use anyhow::Result;
+use petgraph::graph::DiGraph;
+use petgraph::Direction;
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
-/// AI 能理解的意图语义（可扩展）
+// ================= 意图定义 =================
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Intent {
     Transfer { to: String, amount: u64, asset: String },
@@ -15,7 +17,8 @@ pub enum Intent {
     Stake { pool: String, amount: u64, lock_period: Option<u64> },
 }
 
-/// 任务定义
+// ================= 任务定义 =================
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -24,21 +27,8 @@ pub struct Task {
     pub dependencies: Vec<String>,
 }
 
-/// 工作流编译器：将意图编译成任务 DAG
-pub trait WorkflowCompiler: Send + Sync {
-    fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, anyhow::Error>> + Send>>;
-}
+// ================= 执行状态 =================
 
-/// 工作流执行器接口
-pub trait WorkflowExecutor: Send + Sync {
-    /// 提交任务 DAG 并执行
-    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>, anyhow::Error>> + Send>>;
-    
-    /// 获取任务状态
-    fn status(&self, task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
-}
-
-/// 任务状态
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskStatus {
     Pending,
@@ -47,118 +37,169 @@ pub enum TaskStatus {
     Failed(String),
 }
 
-// ---------- 编译器实现 ----------
+// ================= 工作流编译器 =================
 
-/// 一个简单的编译器，支持多种意图
+pub trait WorkflowCompiler: Send + Sync {
+    fn compile(
+        &self,
+        intent: Intent,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>>;
+}
+
+// ---------------- 简单编译器 ----------------
+
 pub struct SimpleCompiler;
 
 impl WorkflowCompiler for SimpleCompiler {
-    fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, anyhow::Error>> + Send>> {
+    fn compile(
+        &self,
+        intent: Intent,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>> {
         Box::pin(async move {
-            match intent {
-                Intent::Transfer { to, amount, asset } => {
-                    Ok(vec![
-                        Task {
-                            id: "1".to_string(),
-                            name: "validate_account".to_string(),
-                            input: format!("{{\"to\":\"{}\"}}", to).into_bytes(),
-                            dependencies: vec![],
-                        },
-                        Task {
-                            id: "2".to_string(),
-                            name: "execute_transfer".to_string(),
-                            input: format!("{{\"amount\":{},\"asset\":\"{}\"}}", amount, asset).into_bytes(),
-                            dependencies: vec!["1".to_string()],
-                        },
-                    ])
-                }
-                Intent::Swap { from, to, amount } => {
-                    Ok(vec![
-                        Task {
-                            id: "1".to_string(),
-                            name: "check_balance".to_string(),
-                            input: format!("{{\"asset\":\"{}\",\"amount\":{}}}", from, amount).into_bytes(),
-                            dependencies: vec![],
-                        },
-                        Task {
-                            id: "2".to_string(),
-                            name: "execute_swap".to_string(),
-                            input: format!("{{\"from\":\"{}\",\"to\":\"{}\",\"amount\":{}}}", from, to, amount).into_bytes(),
-                            dependencies: vec!["1".to_string()],
-                        },
-                    ])
-                }
-                Intent::Stake { pool, amount, lock_period } => {
+            let tasks = match intent {
+                Intent::Transfer { to, amount, asset } => vec![
+                    Task {
+                        id: "1".into(),
+                        name: "validate_account".into(),
+                        input: format!(r#"{{"to":"{}"}}"#, to).into_bytes(),
+                        dependencies: vec![],
+                    },
+                    Task {
+                        id: "2".into(),
+                        name: "execute_transfer".into(),
+                        input: format!(
+                            r#"{{"amount":{},"asset":"{}"}}"#,
+                            amount, asset
+                        )
+                        .into_bytes(),
+                        dependencies: vec!["1".into()],
+                    },
+                ],
+
+                Intent::Swap { from, to, amount } => vec![
+                    Task {
+                        id: "1".into(),
+                        name: "check_balance".into(),
+                        input: format!(
+                            r#"{{"asset":"{}","amount":{}}}"#,
+                            from, amount
+                        )
+                        .into_bytes(),
+                        dependencies: vec![],
+                    },
+                    Task {
+                        id: "2".into(),
+                        name: "execute_swap".into(),
+                        input: format!(
+                            r#"{{"from":"{}","to":"{}","amount":{}}}"#,
+                            from, to, amount
+                        )
+                        .into_bytes(),
+                        dependencies: vec!["1".into()],
+                    },
+                ],
+
+                Intent::Stake {
+                    pool,
+                    amount,
+                    lock_period,
+                } => {
                     let lock = lock_period.unwrap_or(0);
-                    Ok(vec![
+                    vec![
                         Task {
-                            id: "1".to_string(),
-                            name: "approve_stake".to_string(),
-                            input: format!("{{\"pool\":\"{}\",\"amount\":{}}}", pool, amount).into_bytes(),
+                            id: "1".into(),
+                            name: "approve_stake".into(),
+                            input: format!(
+                                r#"{{"pool":"{}","amount":{}}}"#,
+                                pool, amount
+                            )
+                            .into_bytes(),
                             dependencies: vec![],
                         },
                         Task {
-                            id: "2".to_string(),
-                            name: "stake_tokens".to_string(),
-                            input: format!("{{\"pool\":\"{}\",\"amount\":{},\"lock_period\":{}}}", pool, amount, lock).into_bytes(),
-                            dependencies: vec!["1".to_string()],
+                            id: "2".into(),
+                            name: "stake_tokens".into(),
+                            input: format!(
+                                r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#,
+                                pool, amount, lock
+                            )
+                            .into_bytes(),
+                            dependencies: vec!["1".into()],
                         },
-                    ])
+                    ]
                 }
-            }
+            };
+
+            Ok(tasks)
         })
     }
 }
 
-// ---------- 并行执行器实现 ----------
+// ================= 工作流执行器 =================
 
-/// 基于图的并行执行器
+pub trait WorkflowExecutor: Send + Sync {
+    fn execute(
+        &self,
+        tasks: Vec<Task>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
+
+    fn status(
+        &self,
+        task_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
+}
+
+// ---------------- 并行执行器 ----------------
+
 pub struct ParallelExecutor;
 
 impl ParallelExecutor {
-    /// 模拟执行单个任务（未来可以调用真实逻辑）
-    async fn execute_task(task: &Task) -> Result<()> {
+    async fn execute_task(task: Task) -> Result<()> {
         println!("Executing task: {} - {}", task.id, task.name);
-        // 模拟耗时
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         Ok(())
     }
 }
 
 impl WorkflowExecutor for ParallelExecutor {
-    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>, anyhow::Error>> + Send>> {
+    fn execute(
+        &self,
+        tasks: Vec<Task>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>> {
         Box::pin(async move {
-            // 建立任务 ID 到索引的映射
-            let mut id_to_idx: HashMap<String, usize> = HashMap::new();
-            for (i, task) in tasks.iter().enumerate() {
-                id_to_idx.insert(task.id.clone(), i);
+            // ---------- ID 映射 ----------
+            let mut id_to_idx = HashMap::new();
+            for (i, t) in tasks.iter().enumerate() {
+                id_to_idx.insert(t.id.clone(), i);
             }
 
-            // 构建有向图，节点权重存储任务索引
+            // ---------- 构建 DAG ----------
             let mut graph = DiGraph::<usize, ()>::new();
-            let mut node_indices = Vec::with_capacity(tasks.len());
+            let mut nodes = Vec::new();
+
             for i in 0..tasks.len() {
-                node_indices.push(graph.add_node(i));
+                nodes.push(graph.add_node(i));
             }
 
-            // 添加依赖边
+            // 关键修正：依赖方向 dep -> task
             for task in &tasks {
-                let from_idx = id_to_idx[&task.id];
-                let from_node = node_indices[from_idx];
+                let task_idx = id_to_idx[&task.id];
                 for dep in &task.dependencies {
-                    if let Some(&to_idx) = id_to_idx.get(dep) {
-                        let to_node = node_indices[to_idx];
-                        graph.add_edge(from_node, to_node, ());
+                    if let Some(&dep_idx) = id_to_idx.get(dep) {
+                        graph.add_edge(nodes[dep_idx], nodes[task_idx], ());
                     }
                 }
             }
 
-            // 计算入度（基于任务索引）
-            let mut in_degree = vec![0; tasks.len()];
+            // ---------- 入度 ----------
+            let mut in_degree = vec![0usize; tasks.len()];
             for i in 0..tasks.len() {
-                in_degree[i] = graph.edges_directed(node_indices[i], petgraph::Direction::Incoming).count();
+                in_degree[i] = graph
+                    .edges_directed(nodes[i], Direction::Incoming)
+                    .count();
             }
 
+            // ---------- 初始队列 ----------
             let mut queue = VecDeque::new();
             for i in 0..tasks.len() {
                 if in_degree[i] == 0 {
@@ -167,27 +208,33 @@ impl WorkflowExecutor for ParallelExecutor {
             }
 
             let mut results = Vec::new();
+
+            // ---------- 分层并行执行 ----------
             while !queue.is_empty() {
-                let mut handles = JoinSet::new();
-                // 当前层所有可执行的任务
-                for _ in 0..queue.len() {
-                    if let Some(idx) = queue.pop_front() {
-                        let task = tasks[idx].clone();
-                        handles.spawn(async move {
-                            Self::execute_task(&task).await?;
-                            Ok::<usize, anyhow::Error>(idx)
-                        });
-                    }
+                let mut joinset = JoinSet::new();
+                let layer_size = queue.len();
+
+                for _ in 0..layer_size {
+                    let idx = queue.pop_front().unwrap();
+                    let task = tasks[idx].clone();
+
+                    joinset.spawn(async move {
+                        ParallelExecutor::execute_task(task).await?;
+                        Ok::<usize, anyhow::Error>(idx)
+                    });
                 }
 
-                // 等待当前层所有任务完成
-                while let Some(res) = handles.join_next().await {
+                while let Some(res) = joinset.join_next().await {
                     match res {
                         Ok(Ok(idx)) => {
                             results.push(tasks[idx].id.clone());
-                            // 更新下游节点的入度（通过节点索引找到任务索引）
-                            for neighbor in graph.neighbors(node_indices[idx]) {
-                                let n_idx = *graph.node_weight(neighbor).unwrap(); // 节点权重是任务索引
+
+                            // 下游节点入度 -1
+                            for neighbor in graph.neighbors_directed(
+                                nodes[idx],
+                                Direction::Outgoing,
+                            ) {
+                                let n_idx = *graph.node_weight(neighbor).unwrap();
                                 in_degree[n_idx] -= 1;
                                 if in_degree[n_idx] == 0 {
                                     queue.push_back(n_idx);
@@ -204,7 +251,10 @@ impl WorkflowExecutor for ParallelExecutor {
         })
     }
 
-    fn status(&self, _task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
-        Box::pin(async move { Some(TaskStatus::Completed) })
+    fn status(
+        &self,
+        _task_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
+        Box::pin(async { Some(TaskStatus::Completed) })
     }
 }
