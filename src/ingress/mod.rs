@@ -1,16 +1,10 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
-};
-use std::sync::Arc;
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
+use crate::runtime::{RuntimeManager, SimpleRuntime};
 use crate::workflow::{Intent, SimpleCompiler, WorkflowCompiler};
-use crate::runtime::{SimpleRuntime, RuntimeManager};
+use anyhow::Result;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::net::TcpListener;
 
 // ---------- 请求/响应结构体 ----------
 
@@ -82,11 +76,15 @@ async fn run_handler(
     };
 
     // 提交任务到运行时
-    let handle = match state.runtime.submit(move || async move {
-        println!("Executing {} tasks", tasks.len());
-        // 这里可以实际执行 tasks，现在仅做演示
-        Ok(())
-    }).await {
+    let handle = match state
+        .runtime
+        .submit(move || async move {
+            println!("Executing {} tasks", tasks.len());
+            // 这里可以实际执行 tasks，现在仅做演示
+            Ok(())
+        })
+        .await
+    {
         Ok(h) => h,
         Err(e) => {
             return (

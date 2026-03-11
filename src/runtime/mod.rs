@@ -1,9 +1,9 @@
+use anyhow::Result;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::{Semaphore, mpsc, Mutex};
-use anyhow::Result;
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 // ------------------- 公共接口定义 -------------------
 
@@ -31,7 +31,8 @@ pub trait RuntimeManager: Send + Sync {
         Fut: Future<Output = Result<()>> + Send;
 
     /// 获取任务状态
-    fn status(&self, task_id: &str) -> impl std::future::Future<Output = Option<TaskStatus>> + Send;
+    fn status(&self, task_id: &str)
+        -> impl std::future::Future<Output = Option<TaskStatus>> + Send;
 
     /// 取消任务
     fn cancel(&self, task_id: &str) -> impl std::future::Future<Output = Result<()>> + Send;
@@ -143,7 +144,9 @@ impl RuntimeManager for SimpleRuntime {
             hmap.insert(task_id.clone(), join_handle);
         }
 
-        self.task_tx.send(Box::pin(async {})).map_err(|_| anyhow::anyhow!("runtime stopped"))?;
+        self.task_tx
+            .send(Box::pin(async {}))
+            .map_err(|_| anyhow::anyhow!("runtime stopped"))?;
         Ok(TaskHandle { id: task_id })
     }
 
@@ -160,7 +163,7 @@ impl RuntimeManager for SimpleRuntime {
 
         if let Some(handle) = handle {
             handle.abort(); // 终止任务
-            // 更新状态为 Cancelled
+                            // 更新状态为 Cancelled
             let mut smap = self.status_map.lock().await;
             smap.insert(task_id.to_string(), TaskStatus::Cancelled);
             Ok(())

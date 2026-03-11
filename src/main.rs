@@ -1,22 +1,22 @@
-mod payment;
+mod attestation;
+mod audit;
+mod extension;
+mod governance;
 mod identity;
+mod ingress;
+mod market;
+mod observability;
+mod ownership;
+mod payment;
+mod policy;
+mod replication;
+mod resource;
+mod router;
+mod runtime;
+mod sandbox;
 mod storage;
 mod verification;
-mod ownership;
-mod replication;
 mod workflow;
-mod router;
-mod market;
-mod sandbox;
-mod governance;
-mod audit;
-mod policy;
-mod ingress;
-mod observability;
-mod runtime;
-mod resource;
-mod extension;
-mod attestation;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

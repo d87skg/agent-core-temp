@@ -18,8 +18,20 @@ pub struct BatchAttestation {
 }
 
 pub trait AttestationProvider: Send + Sync {
-    fn attest(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<AttestationProof, anyhow::Error>> + Send>>;
-    fn attest_batch(&self, data_batch: Vec<&[u8]>) -> Pin<Box<dyn Future<Output = Result<BatchAttestation, anyhow::Error>> + Send>>;
-    fn verify(&self, proof: &AttestationProof) -> Pin<Box<dyn Future<Output = Result<bool, anyhow::Error>> + Send>>;
-    fn generate_certificate(&self, proof: &AttestationProof) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, anyhow::Error>> + Send>>;
+    fn attest(
+        &self,
+        data: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<AttestationProof, anyhow::Error>> + Send>>;
+    fn attest_batch(
+        &self,
+        data_batch: Vec<&[u8]>,
+    ) -> Pin<Box<dyn Future<Output = Result<BatchAttestation, anyhow::Error>> + Send>>;
+    fn verify(
+        &self,
+        proof: &AttestationProof,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, anyhow::Error>> + Send>>;
+    fn generate_certificate(
+        &self,
+        proof: &AttestationProof,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, anyhow::Error>> + Send>>;
 }

@@ -12,9 +12,21 @@ use tokio::task::JoinSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Intent {
-    Transfer { to: String, amount: u64, asset: String },
-    Swap { from: String, to: String, amount: u64 },
-    Stake { pool: String, amount: u64, lock_period: Option<u64> },
+    Transfer {
+        to: String,
+        amount: u64,
+        asset: String,
+    },
+    Swap {
+        from: String,
+        to: String,
+        amount: u64,
+    },
+    Stake {
+        pool: String,
+        amount: u64,
+        lock_period: Option<u64>,
+    },
 }
 
 // ================= 任务定义 =================
@@ -40,10 +52,7 @@ pub enum TaskStatus {
 // ================= 工作流编译器 =================
 
 pub trait WorkflowCompiler: Send + Sync {
-    fn compile(
-        &self,
-        intent: Intent,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>>;
+    fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>>;
 }
 
 // ---------------- 简单编译器 ----------------
@@ -51,10 +60,7 @@ pub trait WorkflowCompiler: Send + Sync {
 pub struct SimpleCompiler;
 
 impl WorkflowCompiler for SimpleCompiler {
-    fn compile(
-        &self,
-        intent: Intent,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>> {
+    fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>> {
         Box::pin(async move {
             let tasks = match intent {
                 Intent::Transfer { to, amount, asset } => vec![
@@ -67,11 +73,8 @@ impl WorkflowCompiler for SimpleCompiler {
                     Task {
                         id: "2".into(),
                         name: "execute_transfer".into(),
-                        input: format!(
-                            r#"{{"amount":{},"asset":"{}"}}"#,
-                            amount, asset
-                        )
-                        .into_bytes(),
+                        input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset)
+                            .into_bytes(),
                         dependencies: vec!["1".into()],
                     },
                 ],
@@ -80,11 +83,8 @@ impl WorkflowCompiler for SimpleCompiler {
                     Task {
                         id: "1".into(),
                         name: "check_balance".into(),
-                        input: format!(
-                            r#"{{"asset":"{}","amount":{}}}"#,
-                            from, amount
-                        )
-                        .into_bytes(),
+                        input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount)
+                            .into_bytes(),
                         dependencies: vec![],
                     },
                     Task {
@@ -109,11 +109,8 @@ impl WorkflowCompiler for SimpleCompiler {
                         Task {
                             id: "1".into(),
                             name: "approve_stake".into(),
-                            input: format!(
-                                r#"{{"pool":"{}","amount":{}}}"#,
-                                pool, amount
-                            )
-                            .into_bytes(),
+                            input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount)
+                                .into_bytes(),
                             dependencies: vec![],
                         },
                         Task {
@@ -143,10 +140,7 @@ pub trait WorkflowExecutor: Send + Sync {
         tasks: Vec<Task>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
 
-    fn status(
-        &self,
-        task_id: &str,
-    ) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
+    fn status(&self, task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
 }
 
 // ---------------- 并行执行器 ----------------
@@ -194,9 +188,7 @@ impl WorkflowExecutor for ParallelExecutor {
             // ---------- 入度 ----------
             let mut in_degree = vec![0usize; tasks.len()];
             for i in 0..tasks.len() {
-                in_degree[i] = graph
-                    .edges_directed(nodes[i], Direction::Incoming)
-                    .count();
+                in_degree[i] = graph.edges_directed(nodes[i], Direction::Incoming).count();
             }
 
             // ---------- 初始队列 ----------
@@ -230,10 +222,9 @@ impl WorkflowExecutor for ParallelExecutor {
                             results.push(tasks[idx].id.clone());
 
                             // 下游节点入度 -1
-                            for neighbor in graph.neighbors_directed(
-                                nodes[idx],
-                                Direction::Outgoing,
-                            ) {
+                            for neighbor in
+                                graph.neighbors_directed(nodes[idx], Direction::Outgoing)
+                            {
                                 let n_idx = *graph.node_weight(neighbor).unwrap();
                                 in_degree[n_idx] -= 1;
                                 if in_degree[n_idx] == 0 {
@@ -251,10 +242,7 @@ impl WorkflowExecutor for ParallelExecutor {
         })
     }
 
-    fn status(
-        &self,
-        _task_id: &str,
-    ) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
+    fn status(&self, _task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
         Box::pin(async { Some(TaskStatus::Completed) })
     }
 }
