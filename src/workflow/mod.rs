@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 // ================= 意图定义 =================
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Intent {
     Transfer {
@@ -30,7 +29,6 @@ pub enum Intent {
 }
 
 // ================= 任务定义 =================
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -39,8 +37,7 @@ pub struct Task {
     pub dependencies: Vec<String>,
 }
 
-// ================= 执行状态 =================
-
+// ================= 任务状态 =================
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskStatus {
     Pending,
@@ -50,13 +47,11 @@ pub enum TaskStatus {
 }
 
 // ================= 工作流编译器 =================
-
 pub trait WorkflowCompiler: Send + Sync {
     fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>>;
 }
 
 // ---------------- 简单编译器 ----------------
-
 pub struct SimpleCompiler;
 
 impl WorkflowCompiler for SimpleCompiler {
@@ -73,78 +68,77 @@ impl WorkflowCompiler for SimpleCompiler {
                     Task {
                         id: "2".into(),
                         name: "execute_transfer".into(),
+<<<<<<< HEAD
                         input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset)
                             .into_bytes(),
+=======
+                        input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset).into_bytes(),
+>>>>>>> 3528dad7079d2f8d60aa22b6f97e9908ab23038a
                         dependencies: vec!["1".into()],
                     },
                 ],
-
                 Intent::Swap { from, to, amount } => vec![
                     Task {
                         id: "1".into(),
                         name: "check_balance".into(),
+<<<<<<< HEAD
                         input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount)
                             .into_bytes(),
+=======
+                        input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount).into_bytes(),
+>>>>>>> 3528dad7079d2f8d60aa22b6f97e9908ab23038a
                         dependencies: vec![],
                     },
                     Task {
                         id: "2".into(),
                         name: "execute_swap".into(),
-                        input: format!(
-                            r#"{{"from":"{}","to":"{}","amount":{}}}"#,
-                            from, to, amount
-                        )
-                        .into_bytes(),
+                        input: format!(r#"{{"from":"{}","to":"{}","amount":{}}}"#, from, to, amount).into_bytes(),
                         dependencies: vec!["1".into()],
                     },
                 ],
-
-                Intent::Stake {
-                    pool,
-                    amount,
-                    lock_period,
-                } => {
+                Intent::Stake { pool, amount, lock_period } => {
                     let lock = lock_period.unwrap_or(0);
                     vec![
                         Task {
                             id: "1".into(),
                             name: "approve_stake".into(),
+<<<<<<< HEAD
                             input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount)
                                 .into_bytes(),
+=======
+                            input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount).into_bytes(),
+>>>>>>> 3528dad7079d2f8d60aa22b6f97e9908ab23038a
                             dependencies: vec![],
                         },
                         Task {
                             id: "2".into(),
                             name: "stake_tokens".into(),
-                            input: format!(
-                                r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#,
-                                pool, amount, lock
-                            )
-                            .into_bytes(),
+                            input: format!(r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#, pool, amount, lock).into_bytes(),
                             dependencies: vec!["1".into()],
                         },
                     ]
                 }
             };
-
             Ok(tasks)
         })
     }
 }
 
 // ================= 工作流执行器 =================
-
 pub trait WorkflowExecutor: Send + Sync {
+<<<<<<< HEAD
     fn execute(
         &self,
         tasks: Vec<Task>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
 
+=======
+    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
+>>>>>>> 3528dad7079d2f8d60aa22b6f97e9908ab23038a
     fn status(&self, task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
 }
 
 // ---------------- 并行执行器 ----------------
-
 pub struct ParallelExecutor;
 
 impl ParallelExecutor {
@@ -156,26 +150,19 @@ impl ParallelExecutor {
 }
 
 impl WorkflowExecutor for ParallelExecutor {
-    fn execute(
-        &self,
-        tasks: Vec<Task>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>> {
+    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>> {
         Box::pin(async move {
-            // ---------- ID 映射 ----------
             let mut id_to_idx = HashMap::new();
             for (i, t) in tasks.iter().enumerate() {
                 id_to_idx.insert(t.id.clone(), i);
             }
 
-            // ---------- 构建 DAG ----------
             let mut graph = DiGraph::<usize, ()>::new();
             let mut nodes = Vec::new();
-
             for i in 0..tasks.len() {
                 nodes.push(graph.add_node(i));
             }
 
-            // 关键修正：依赖方向 dep -> task
             for task in &tasks {
                 let task_idx = id_to_idx[&task.id];
                 for dep in &task.dependencies {
@@ -185,13 +172,11 @@ impl WorkflowExecutor for ParallelExecutor {
                 }
             }
 
-            // ---------- 入度 ----------
             let mut in_degree = vec![0usize; tasks.len()];
             for i in 0..tasks.len() {
                 in_degree[i] = graph.edges_directed(nodes[i], Direction::Incoming).count();
             }
 
-            // ---------- 初始队列 ----------
             let mut queue = VecDeque::new();
             for i in 0..tasks.len() {
                 if in_degree[i] == 0 {
@@ -201,7 +186,6 @@ impl WorkflowExecutor for ParallelExecutor {
 
             let mut results = Vec::new();
 
-            // ---------- 分层并行执行 ----------
             while !queue.is_empty() {
                 let mut joinset = JoinSet::new();
                 let layer_size = queue.len();
@@ -209,7 +193,6 @@ impl WorkflowExecutor for ParallelExecutor {
                 for _ in 0..layer_size {
                     let idx = queue.pop_front().unwrap();
                     let task = tasks[idx].clone();
-
                     joinset.spawn(async move {
                         ParallelExecutor::execute_task(task).await?;
                         Ok::<usize, anyhow::Error>(idx)
@@ -220,11 +203,15 @@ impl WorkflowExecutor for ParallelExecutor {
                     match res {
                         Ok(Ok(idx)) => {
                             results.push(tasks[idx].id.clone());
+<<<<<<< HEAD
 
                             // 下游节点入度 -1
                             for neighbor in
                                 graph.neighbors_directed(nodes[idx], Direction::Outgoing)
                             {
+=======
+                            for neighbor in graph.neighbors_directed(nodes[idx], Direction::Outgoing) {
+>>>>>>> 3528dad7079d2f8d60aa22b6f97e9908ab23038a
                                 let n_idx = *graph.node_weight(neighbor).unwrap();
                                 in_degree[n_idx] -= 1;
                                 if in_degree[n_idx] == 0 {
