@@ -227,10 +227,6 @@ impl WorkflowExecutor for ParallelExecutor {
         })
     }
 
-    fn status(
-        &self,
-        _task_id: &str,
-    ) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
-        Box::pin(async { Some(TaskStatus::Completed) })
-    }
+fn status(&self, _task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
+    Box::pin(async { Some(TaskStatus::Completed) })
 }
