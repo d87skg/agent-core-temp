@@ -3,6 +3,14 @@ name = "agent-core"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.78.0"
+authors = ["d87skg <jmhbldg@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "A modular Rust execution engine for AI agents"
+repository = "https://github.com/d87skg/agent-core-temp"
+documentation = "https://docs.rs/agent-core"
+readme = "README.md"
+keywords = ["ai", "agent", "workflow", "execution", "runtime"]
+categories = ["development-tools", "asynchronous"]
 
 [dependencies]
 tokio = { version = "1.36", features = ["full", "rt-multi-thread", "tracing"] }
