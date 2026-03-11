@@ -56,11 +56,7 @@ impl WorkflowCompiler for SimpleCompiler {
                     Task {
                         id: "2".into(),
                         name: "execute_transfer".into(),
-                        input: format!(
-                            r#"{{"amount":{},"asset":"{}"}}"#,
-                            amount, asset
-                        )
-                        .into_bytes(),
+                        input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset).into_bytes(),
                         dependencies: vec!["1".into()],
                     },
                 ],
@@ -68,49 +64,29 @@ impl WorkflowCompiler for SimpleCompiler {
                     Task {
                         id: "1".into(),
                         name: "check_balance".into(),
-                        input: format!(
-                            r#"{{"asset":"{}","amount":{}}}"#,
-                            from, amount
-                        )
-                        .into_bytes(),
+                        input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount).into_bytes(),
                         dependencies: vec![],
                     },
                     Task {
                         id: "2".into(),
                         name: "execute_swap".into(),
-                        input: format!(
-                            r#"{{"from":"{}","to":"{}","amount":{}}}"#,
-                            from, to, amount
-                        )
-                        .into_bytes(),
+                        input: format!(r#"{{"from":"{}","to":"{}","amount":{}}}"#, from, to, amount).into_bytes(),
                         dependencies: vec!["1".into()],
                     },
                 ],
-                Intent::Stake {
-                    pool,
-                    amount,
-                    lock_period,
-                } => {
+                Intent::Stake { pool, amount, lock_period } => {
                     let lock = lock_period.unwrap_or(0);
                     vec![
                         Task {
                             id: "1".into(),
                             name: "approve_stake".into(),
-                            input: format!(
-                                r#"{{"pool":"{}","amount":{}}}"#,
-                                pool, amount
-                            )
-                            .into_bytes(),
+                            input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount).into_bytes(),
                             dependencies: vec![],
                         },
                         Task {
                             id: "2".into(),
                             name: "stake_tokens".into(),
-                            input: format!(
-                                r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#,
-                                pool, amount, lock
-                            )
-                            .into_bytes(),
+                            input: format!(r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#, pool, amount, lock).into_bytes(),
                             dependencies: vec!["1".into()],
                         },
                     ]
@@ -123,12 +99,8 @@ impl WorkflowCompiler for SimpleCompiler {
 
 // ================= 工作流执行器 =================
 pub trait WorkflowExecutor: Send + Sync {
-    fn execute(&self, tasks: Vec<Task>)
-        -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
-    fn status(
-        &self,
-        task_id: &str,
-    ) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
+    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
+    fn status(&self, task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
 }
 
 // ---------------- 并行执行器 ----------------
@@ -143,10 +115,7 @@ impl ParallelExecutor {
 }
 
 impl WorkflowExecutor for ParallelExecutor {
-    fn execute(
-        &self,
-        tasks: Vec<Task>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>> {
+    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>> {
         Box::pin(async move {
             let mut id_to_idx = HashMap::new();
             for (i, t) in tasks.iter().enumerate() {
@@ -170,9 +139,7 @@ impl WorkflowExecutor for ParallelExecutor {
 
             let mut in_degree = vec![0usize; tasks.len()];
             for i in 0..tasks.len() {
-                in_degree[i] = graph
-                    .edges_directed(nodes[i], Direction::Incoming)
-                    .count();
+                in_degree[i] = graph.edges_directed(nodes[i], Direction::Incoming).count();
             }
 
             let mut queue = VecDeque::new();
@@ -201,10 +168,7 @@ impl WorkflowExecutor for ParallelExecutor {
                     match res {
                         Ok(Ok(idx)) => {
                             results.push(tasks[idx].id.clone());
-                            for neighbor in graph.neighbors_directed(
-                                nodes[idx],
-                                Direction::Outgoing,
-                            ) {
+                            for neighbor in graph.neighbors_directed(nodes[idx], Direction::Outgoing) {
                                 let n_idx = *graph.node_weight(neighbor).unwrap();
                                 in_degree[n_idx] -= 1;
                                 if in_degree[n_idx] == 0 {
@@ -213,12 +177,7 @@ impl WorkflowExecutor for ParallelExecutor {
                             }
                         }
                         Ok(Err(e)) => return Err(e),
-                        Err(e) => {
-                            return Err(anyhow::anyhow!(
-                                "Task panicked: {}",
-                                e
-                            ))
-                        }
+                        Err(e) => return Err(anyhow::anyhow!("Task panicked: {}", e)),
                     }
                 }
             }
@@ -227,6 +186,7 @@ impl WorkflowExecutor for ParallelExecutor {
         })
     }
 
-fn status(&self, _task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
-    Box::pin(async { Some(TaskStatus::Completed) })
+    fn status(&self, _task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
+        Box::pin(async { Some(TaskStatus::Completed) })
+    }
 }
