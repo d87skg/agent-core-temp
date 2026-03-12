@@ -20,6 +20,9 @@ mod workflow;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 初始化可观测性（添加这一行）
+    observability::init_observability()?;
+
     println!("🚀 Starting agent-core ingress server...");
     ingress::start_server().await?;
     Ok(())

@@ -39,6 +39,8 @@ tracing-opentelemetry = "0.22"
 opentelemetry = "0.21"
 uuid = { version = "1.6", features = ["v4"] }
 axum = "0.7"
+once_cell = "1.19"
+prometheus = "0.13"          # 已移到这里（生产依赖）
 
 [dev-dependencies]
 tempfile = "3.8"
@@ -46,3 +48,12 @@ assert_cmd = "2.0"
 predicates = "3.0"
 rand = "0.8"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+
+[profile.release]
+opt-level = "z"           # 优化大小，让代码变形
+lto = true                # 链接时优化，跨模块混淆
+codegen-units = 1         # 单单元编译，优化更激进
+strip = "symbols"         # 剥离符号表（函数名等）
+[[bench]]
+name = "performance"
+harness = false
