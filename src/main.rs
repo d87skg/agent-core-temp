@@ -1,26 +1,9 @@
-mod attestation;
-mod audit;
-mod extension;
-mod governance;
-mod identity;
-mod ingress;
-mod market;
-mod observability;
-mod ownership;
-mod payment;
-mod policy;
-mod replication;
-mod resource;
-mod router;
-mod runtime;
-mod sandbox;
-mod storage;
-mod verification;
-mod workflow;
+use agent_core_temp::observability;
+use agent_core_temp::ingress;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 初始化可观测性（添加这一行）
+    // 初始化可观测性
     observability::init_observability()?;
 
     println!("🚀 Starting agent-core ingress server...");

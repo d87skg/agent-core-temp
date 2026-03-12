@@ -1,5 +1,22 @@
-// 导出你需要测试的模块
+// src/lib.rs
+
+pub mod attestation;
+pub mod audit;
+pub mod extension;
+pub mod governance;
+pub mod identity;
+pub mod idempotency;
+pub mod ingress;
+pub mod market;
 pub mod observability;
-// 以后如果需要测试其他模块，可以在这里继续添加
-// pub mod workflow;
-// pub mod ingress;
+pub mod ownership;
+pub mod payment;
+pub mod policy;
+pub mod replication;
+pub mod resource;
+pub mod router;
+pub mod runtime;
+pub mod sandbox;
+pub mod storage;
+pub mod verification;
+pub mod workflow;
