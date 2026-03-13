@@ -1,1 +1,26 @@
 /target
+# Rust build artifacts
+/target/
+**/target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large binary files
+*.exe
+*.pdb
+*.rlib
+*.dll
+*.so
+*.dylib
+
+# Logs
+*.log
+**/debug/
+**/release/
