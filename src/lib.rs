@@ -1,5 +1,4 @@
 // src/lib.rs
-
 pub mod attestation;
 pub mod audit;
 pub mod extension;
@@ -20,3 +19,5 @@ pub mod sandbox;
 pub mod storage;
 pub mod verification;
 pub mod workflow;
+pub mod scheduler;
+pub mod hlc;

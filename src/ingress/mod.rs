@@ -1,7 +1,14 @@
+use crate::observability;
 use crate::runtime::{RuntimeManager, SimpleRuntime};
 use crate::workflow::{Intent, SimpleCompiler, WorkflowCompiler};
 use anyhow::Result;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -106,6 +113,14 @@ async fn run_handler(
     )
 }
 
+/// 新增的 metrics 处理函数（统一返回 (StatusCode, String)）
+async fn metrics_handler() -> impl IntoResponse {
+    match observability::prometheus_handle() {
+        Some(handle) => (StatusCode::OK, handle.render()),
+        None => (StatusCode::SERVICE_UNAVAILABLE, "Prometheus not initialized".to_string()),
+    }
+}
+
 // ---------- 启动服务器 ----------
 
 pub async fn start_server() -> Result<()> {
@@ -118,9 +133,10 @@ pub async fn start_server() -> Result<()> {
         runtime: Arc::new(runtime),
     };
 
-    // 创建路由
+    // 创建路由，添加 /metrics 和 /run 路由
     let app = Router::new()
-        .route("/run", post(run_handler))
+        .route("/run", post(run_handler))    // 原有业务路由
+        .route("/metrics", get(metrics_handler)) // 新增指标路由
         .with_state(state);
 
     let addr = "127.0.0.1:3000";
