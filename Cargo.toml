@@ -43,17 +43,17 @@ libc = "0.2"
 sha2 = "0.10"
 hex = "0.4"
 ring = "0.17"
-agent-core-temp = "0.1"
 base64 = "0.22"
 prometheus = "0.13"
 chrono = "0.4"
 wasmtime = { version = "26", features = ["async", "cranelift", "parallel-compilation"] }
 wasmtime-wasi = "26"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+async-trait = "0.1"          # 从 dev-dependencies 移入，用于 trait 定义
+lru = "0.10"                 # 新增，用于 LRU 缓存
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["full", "test-util"] }
-async-trait = "0.1"  # 新增，用于异步 trait
 tempfile = "3.8"
 assert_cmd = "2.0"
 predicates = "3.0"

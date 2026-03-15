@@ -21,3 +21,6 @@ pub mod verification;
 pub mod workflow;
 pub mod scheduler;
 pub mod hlc;
+// src/lib.rs
+pub mod error;
+pub use error::{AgentError, Result};
