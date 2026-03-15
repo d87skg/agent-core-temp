@@ -1,13 +1,13 @@
 # agent-core ⚙️ · AI Agent 的可靠执行层
 
 [![Crates.io][crates-badge]][crates-url]
-[![MIT/Apache 2.0][license-badge]][license-url]
+[![License][license-badge]][license-url]
 [![Jepsen Test][jepsen-badge]][jepsen-url]
 [![WASM Sandbox][wasm-badge]][wasm-url]
 
-[crates-badge]: https://img.shields.io/badge/crates.io-v0.1.0--p0-orange
+[crates-badge]: https://img.shields.io/crates/v/agent-core-temp
 [crates-url]: https://crates.io/crates/agent-core-temp
-[license-badge]: https://img.shields.io/badge/license-MIT%2FApache--2.0-blue
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue
 [license-url]: https://github.com/d87skg/agent-core-temp/blob/main/LICENSE
 [jepsen-badge]: https://img.shields.io/badge/Jepsen-✔️%20linearizable-brightgreen
 [jepsen-url]: https://github.com/d87skg/agent-core-temp/tree/main/tests/jepsen_idempotency.rs
@@ -25,8 +25,6 @@
 
 ## 🧩 架构图
 
-下图展示了 agent-core 如何与上层 AI Agent 框架（如 OpenClaw）协作，为任务执行提供一致性、安全性和可观测性。
-
 ```mermaid
 flowchart TB
     subgraph AI Agent Frameworks
@@ -37,7 +35,7 @@ flowchart TB
         B[幂等性核心<br/>Fencing Tokens + CRDT]
         C[WASM 沙箱<br/>内存/CPU 隔离]
         D[可观测性<br/>Prometheus 指标]
-        E[分布式调度器<br/>Redis (预留)]
+        E[分布式调度器<br/>Redis]
     end
     subgraph External World
         F[API / 数据库 / 区块链]
@@ -48,12 +46,31 @@ flowchart TB
     B -.-> D
     E -.-> B
     D --> F
-    说明： •  AI Agent 框架将任务提交给 agent-core，由幂等性核心确保任务无论执行多少次都只有一次生效。  •  任务逻辑在 WASM 沙箱中运行，保证隔离与安全。  •  所有执行步骤均通过 Prometheus 暴露指标，便于监控。  •  预留的 Redis 调度器支持分布式任务分发。     ✨ 核心特性 •  ✅ Exactly‑Once 执行保障
-基于 Fencing Tokens + CRDT 存储，通过 Jepsen 风格的线性一致性、网络分区、时钟回拨测试。  •  🔒 安全的 WASM 沙箱
-内存限制、CPU 燃料（Fuel）、能力隔离，防止无限循环、内存爆炸和未授权系统调用。
-已通过 5 项安全测试验证。  •  📊 内置可观测性
-Prometheus 指标（请求数、任务数、WASM 执行耗时等）自动集成，开箱即用。  •  ⚙️ 高性能并发执行器
-基于  tokio  的并行执行器，支持高并发任务调度。  •  🧩 模块化设计
-19 个冻结模块，严格遵循 27 条宪法原则，接口永不修改。  •  🔁 分布式调度器
-集成 Redis，支持多 worker 消费任务，实现分布式执行。
+    说明：
 
+AI Agent 框架将任务提交给 agent-core，由幂等性核心确保任务无论执行多少次都只有一次生效。
+
+任务逻辑在 WASM 沙箱中运行，保证隔离与安全。
+
+所有执行步骤均通过 Prometheus 暴露指标，便于监控。
+
+Redis 调度器支持分布式任务分发，并已实现重试和死信队列。
+✨ 核心特性
+🔁 Exactly‑Once 执行保障
+基于 Fencing Tokens + CRDT 存储，通过 Jepsen 风格的线性一致性、网络分区、时钟回拨测试。
+
+🔒 安全的 WASM 沙箱
+内存限制、CPU 燃料（Fuel）、能力隔离，防止无限循环、内存爆炸和未授权系统调用。
+已通过 5 项安全测试验证。
+
+📊 内置可观测性
+Prometheus 指标（任务数、重试次数、WASM 执行耗时等）自动集成，开箱即用。
+
+⚙️ 高性能并发执行器
+基于 tokio 的并行执行器，支持高并发任务调度。
+
+🌐 分布式调度器
+Redis 实现，支持任务重试、死信队列，通过 pipeline 优化后单次操作延迟 <1.2ms。
+
+🧩 模块化设计
+19 个冻结模块，严格遵循 27 条宪法原则，接口永不修改。

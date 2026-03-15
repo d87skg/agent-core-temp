@@ -1,4 +1,3 @@
-// src/error.rs
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -23,6 +22,13 @@ pub enum AgentError {
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    #[error("WASM error: {0}")]
+    Wasm(String),
+
+    #[cfg(feature = "sled-storage")]
+    #[error("Sled error: {0}")]
+    Sled(#[from] sled::Error),
 
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),

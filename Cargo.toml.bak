@@ -34,7 +34,7 @@ metrics-exporter-prometheus = "0.15"
 metrics-util = "0.17"
 futures = "0.3"
 pin-project = "1.1"
-uuid = { version = "1.6", features = ["v4", "serde"] }
+uuid = { version = "1.6", features = ["v4"] }
 axum = "0.7"
 zeroize = { version = "1.7", features = ["derive"] }
 secrecy = { version = "0.8", features = ["serde"] }
@@ -43,35 +43,24 @@ libc = "0.2"
 sha2 = "0.10"
 hex = "0.4"
 ring = "0.17"
+agent-core-temp = "0.1"
 base64 = "0.22"
 prometheus = "0.13"
 chrono = "0.4"
 wasmtime = { version = "26", features = ["async", "cranelift", "parallel-compilation"] }
 wasmtime-wasi = "26"
-async-trait = "0.1"
-lru = "0.10"
-wat = "1.0"
-rand = "0.8"
-
-# 可选依赖
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
-sled = { version = "0.34", optional = true }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["full", "test-util"] }
+async-trait = "0.1"  # 新增，用于异步 trait
 tempfile = "3.8"
 assert_cmd = "2.0"
 predicates = "3.0"
 rand = "0.8"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 proptest = "1.5"
-reqwest = { version = "0.11", features = ["json"] }
 wat = "1.0"
-
-[features]
-default = []
-redis-scheduler = ["redis"]
-sled-storage = ["sled"]
 
 [profile.release]
 opt-level = "z"
@@ -85,16 +74,4 @@ harness = false
 
 [[bench]]
 name = "idempotency_benchmark"
-harness = false
-
-[[bench]]
-name = "idempotency_bench"
-harness = false
-
-[[bench]]
-name = "scheduler_bench"
-harness = false
-
-[[bench]]
-name = "wasm_bench"
 harness = false

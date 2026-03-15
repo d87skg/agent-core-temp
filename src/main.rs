@@ -1,16 +1,21 @@
-// src/main.rs
 use agent_core_temp::observability;
 use agent_core_temp::ingress;
-use agent_core_temp::scheduler::RedisScheduler;
-use agent_core_temp::runtime::executor::ParallelExecutor;
+use agent_core_temp::scheduler::memory::MemoryScheduler;
+use agent_core_temp::scheduler::Scheduler;
+#[cfg(feature = "redis-scheduler")]
+use agent_core_temp::scheduler::redis::RedisScheduler;
+use agent_core_temp::idempotency::IdempotencyBackend;
+use agent_core_temp::idempotency::memory::MemoryBackend;
+#[cfg(feature = "sled-storage")]
+use agent_core_temp::idempotency::sled::SledBackend;
 use anyhow::Result;
+use std::env;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
 use tracing_subscriber;
+use rand::Rng;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 初始化日志
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .with_target(true)
@@ -20,76 +25,62 @@ async fn main() -> Result<()> {
     observability::init_observability()?;
     println!("✅ Observability initialized");
 
-    // 初始化 Redis 调度器
-    let redis_url = "redis://127.0.0.1:6379";
-    let scheduler = Arc::new(RedisScheduler::new(redis_url).await?);
-    println!("✅ Redis scheduler connected to {}", redis_url);
+    // 1. 选择调度器后端
+    let scheduler_type = env::var("SCHEDULER_TYPE").unwrap_or_else(|_| "memory".to_string());
+    let scheduler: Arc<dyn Scheduler> = match scheduler_type.as_str() {
+        "memory" => {
+            println!("📦 Using in-memory scheduler");
+            Arc::new(MemoryScheduler::new())
+        }
+        #[cfg(feature = "redis-scheduler")]
+        "redis" => {
+            let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            println!("📦 Using Redis scheduler at {}", redis_url);
+            Arc::new(RedisScheduler::new(&redis_url, "agent-stream", "agent-group", "worker-1", 3).await?)
+        }
+        _ => {
+            anyhow::bail!("Unknown scheduler type: {}", scheduler_type);
+        }
+    };
 
-    // 创建并发执行器
-    let executor = Arc::new(ParallelExecutor::new(10));
+    // 2. 选择幂等性存储后端
+    let storage_type = env::var("IDEMPOTENCY_STORAGE").unwrap_or_else(|_| "memory".to_string());
+    let _idempotency_backend: Arc<dyn IdempotencyBackend> = match storage_type.as_str() {
+        "memory" => {
+            println!("📦 Using in-memory idempotency backend");
+            Arc::new(MemoryBackend::new(1000))
+        }
+        #[cfg(feature = "sled-storage")]
+        "sled" => {
+            let path = env::var("SLED_PATH").unwrap_or_else(|_| "./data/sled".to_string());
+            println!("📦 Using Sled idempotency backend at {}", path);
+            Arc::new(SledBackend::new(&path, 1000)?)
+        }
+        _ => {
+            anyhow::bail!("Unknown idempotency storage type: {}", storage_type);
+        }
+    };
+    // 注意：幂等性存储目前未传入 ingress，仅用于演示。后续可扩展 ingress 使用它。
 
-    // 启动后台 worker 循环
+    // 3. 启动 worker 循环（消费任务）
     let worker_scheduler = scheduler.clone();
-    let worker_executor = executor.clone();
-    let _worker_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         loop {
-            match worker_scheduler.pop().await {
-                Ok(Some(task)) => {
-                    println!("📥 Worker received task: {} (type: {})", task.id, task.task_type);
-                    observability::increment_tasks_total();
-
-                    let task_id_for_exec = task.id.clone();
-                    let task_id_for_log = task.id.clone();
-                    let task_type_for_exec = task.task_type.clone();
-                    let payload_for_exec = task.payload.clone();
-
-                    let exec = worker_executor.clone();
-                    tokio::spawn(async move {
-                        let result = exec.execute(task_id_for_exec, move || {
-                            println!("⚙️  Executing task of type {}", task_type_for_exec);
-                            std::thread::sleep(Duration::from_millis(500));
-                            payload_for_exec.len()
-                        }).await;
-
-                        match result {
-                            Ok(len) => {
-                                println!("✅ Task {} completed, result length: {}", task_id_for_log, len);
-                                observability::increment_tasks_completed();
-                            }
-                            Err(e) => {
-                                eprintln!("❌ Task {} failed: {}", task_id_for_log, e);
-                                observability::increment_tasks_failed();
-                            }
-                        }
-                    });
-                }
-                Ok(None) => sleep(Duration::from_millis(100)).await,
-                Err(e) => {
-                    eprintln!("⚠️  Error popping task: {}", e);
-                    sleep(Duration::from_secs(1)).await;
+            if let Some(task) = worker_scheduler.pop().await.unwrap() {
+                println!("👷 Worker got task: {}", task.id);
+                if rand::thread_rng().gen_bool(0.5) {
+                    worker_scheduler.ack(&task.id).await.unwrap();
+                    println!("✅ Task {} acked", task.id);
+                } else {
+                    worker_scheduler.nack(&task.id, "simulated error").await.unwrap();
+                    println!("❌ Task {} nacked", task.id);
                 }
             }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     });
 
-    // 临时测试任务
-    let test_task_id = scheduler.submit("test", b"hello".to_vec()).await?;
-    println!("📤 Submitted test task: {}", test_task_id);
-
     println!("🚀 Starting agent-core ingress server...");
-    // 传入 scheduler 参数
-    let ingress_future = ingress::start_server(scheduler.clone());
-
-    tokio::select! {
-        result = ingress_future => {
-            if let Err(e) = result {
-                eprintln!("Ingress server error: {}", e);
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            println!("👋 Received Ctrl+C, shutting down gracefully...");
-        }
-    }
-
+    ingress::start_server(scheduler).await?;
     Ok(())
 }

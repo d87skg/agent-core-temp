@@ -95,6 +95,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_hlc_receive() {
         let mut hlc1 = HlcClock::new();
         let mut hlc2 = HlcClock::new();

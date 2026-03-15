@@ -67,4 +67,6 @@ pub trait IdempotencyBackend: Send + Sync + 'static {
     /// 释放超时锁（将 Pending 状态超过 ttl 的记录删除或标记为可重试）
     async fn release_timed_out_locks(&self, timeout: Duration) -> Result<usize>;
 }
-mod memory;
+pub mod memory;
+#[cfg(feature = "sled-storage")]
+pub mod sled;

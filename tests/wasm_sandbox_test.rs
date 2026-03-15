@@ -110,13 +110,14 @@ async fn test_storage_isolation() {
       (data (i32.const 0) "test-key")
       (data (i32.const 20) "test-value")
 
-      (func (export "write")
+      (func (export "write") (result i32)
         i32.const 0
         i32.const 8
         i32.const 20
         i32.const 10
         call $storage_set
         drop
+        i32.const 0
       )
 
       (func (export "read") (result i32)
@@ -152,8 +153,7 @@ async fn test_storage_isolation() {
         10_000_000,
         test_logger(),
     ).expect("failed to load plugin2");
-    let result = plugin2.call("read", serde_json::json!(null)).expect("read failed");
-    // 仅验证调用成功，隔离性由不同插件实例保证
+    let _result = plugin2.call("read", serde_json::json!(null)).expect("read failed");
 }
 
 #[tokio::test]
@@ -185,6 +185,5 @@ async fn test_host_function_robustness() {
         test_logger(),
     ).expect("failed to load plugin");
 
-    let result = plugin.call("bad_log", serde_json::json!(null));
-    // 只要求不 panic，不进一步断言
+    let _result = plugin.call("bad_log", serde_json::json!(null));
 }

@@ -1,0 +1,37 @@
+// examples/openclaw_integration.rs
+use anyhow::Result;
+use serde_json::json;
+use std::time::Duration;
+use tokio::time::sleep;
+
+/// 模拟 OpenClaw 调用 agent-core 的 /run 接口提交任务
+async fn submit_task_to_agent_core(task_type: &str, payload: serde_json::Value) -> Result<String> {
+    let client = reqwest::Client::new();
+    let body = json!({ "intent": { "type": task_type, "payload": payload } });
+    let resp = client
+        .post("http://127.0.0.1:3000/run")
+        .json(&body)
+        .send()
+        .await?;
+    let task_id = resp.json::<serde_json::Value>().await?["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    Ok(task_id)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // 假设 agent-core 服务已在后台运行（由用户自行启动）
+    println!("Submitting task to agent-core...");
+    let task_id = submit_task_to_agent_core("transfer", json!({"to":"user2","amount":100,"asset":"BTC"})).await?;
+    println!("Task submitted: {}", task_id);
+
+    // 模拟等待任务完成（实际需轮询状态，这里简化）
+    sleep(Duration::from_secs(2)).await;
+
+    // 获取指标（可选）
+    let metrics = reqwest::get("http://127.0.0.1:3000/metrics").await?.text().await?;
+    println!("Metrics:\n{}", metrics);
+    Ok(())
+}

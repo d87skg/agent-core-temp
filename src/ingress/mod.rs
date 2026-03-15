@@ -1,6 +1,6 @@
 use crate::observability;
-use crate::scheduler::RedisScheduler;
-use crate::workflow::{Intent, SimpleCompiler, WorkflowCompiler};
+use crate::scheduler::Scheduler;
+use crate::workflow::{Intent, SimpleCompiler};
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -37,11 +37,10 @@ pub struct RunResponse {
 }
 
 // ---------- 应用状态 ----------
-
 #[derive(Clone)]
 pub struct AppState {
     compiler: Arc<SimpleCompiler>,
-    scheduler: Arc<RedisScheduler>, // 替换原来的 runtime
+    scheduler: Arc<dyn Scheduler>,
 }
 
 // ---------- HTTP 处理函数 ----------
@@ -58,7 +57,6 @@ async fn run_handler(
             asset: req.intent.asset.unwrap_or_default(),
         },
         _ => {
-            // 无效的意图类型，记录失败指标
             observability::increment_tasks_failed();
             return (
                 StatusCode::BAD_REQUEST,
@@ -70,23 +68,8 @@ async fn run_handler(
         }
     };
 
-    // 编译意图为任务
-    let tasks = match state.compiler.compile(intent).await {
-        Ok(t) => t,
-        Err(e) => {
-            observability::increment_tasks_failed();
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(RunResponse {
-                    task_id: "".to_string(),
-                    status: format!("compile error: {}", e),
-                }),
-            );
-        }
-    };
-
-    // 将任务列表序列化为 payload（这里使用 JSON 序列化）
-    let payload = match serde_json::to_vec(&tasks) {
+    // 编译意图为任务（这里简化：将 Intent 序列化为 payload）
+    let payload = match serde_json::to_vec(&intent) {
         Ok(p) => p,
         Err(e) => {
             observability::increment_tasks_failed();
@@ -100,8 +83,11 @@ async fn run_handler(
         }
     };
 
-    // 提交到 Redis 调度器
-    let task_id = match state.scheduler.submit("workflow", payload).await {
+    // 创建调度器任务
+    let task = crate::scheduler::Task::new("workflow", payload, 5, None);
+
+    // 提交到调度器
+    let task_id = match state.scheduler.submit(task).await {
         Ok(id) => id,
         Err(e) => {
             observability::increment_tasks_failed();
@@ -115,7 +101,6 @@ async fn run_handler(
         }
     };
 
-    // 成功提交任务，增加任务总数计数
     observability::increment_tasks_total();
 
     (
@@ -127,7 +112,7 @@ async fn run_handler(
     )
 }
 
-/// metrics 处理函数
+// ---------- metrics 处理函数 ----------
 async fn metrics_handler() -> impl IntoResponse {
     match observability::prometheus_handle() {
         Some(handle) => (StatusCode::OK, handle.render()),
@@ -136,8 +121,7 @@ async fn metrics_handler() -> impl IntoResponse {
 }
 
 // ---------- 启动服务器 ----------
-
-pub async fn start_server(scheduler: Arc<RedisScheduler>) -> Result<()> {
+pub async fn start_server(scheduler: Arc<dyn Scheduler>) -> Result<()> {
     let compiler = SimpleCompiler;
 
     let state = AppState {
@@ -145,7 +129,6 @@ pub async fn start_server(scheduler: Arc<RedisScheduler>) -> Result<()> {
         scheduler,
     };
 
-    // 创建路由，添加 /metrics 和 /run 路由
     let app = Router::new()
         .route("/run", post(run_handler))
         .route("/metrics", get(metrics_handler))
