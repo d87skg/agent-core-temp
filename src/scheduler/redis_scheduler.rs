@@ -1,5 +1,5 @@
 // src/scheduler/redis_scheduler.rs
-use redis::{AsyncCommands, Client, RedisResult};
+use redis::{AsyncCommands, Client};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use anyhow::Result;
@@ -27,10 +27,9 @@ impl RedisScheduler {
     }
 
     pub async fn submit(&self, task_type: &str, payload: Vec<u8>) -> Result<String> {
-        // 使用新的 multiplexed 连接
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let task_id = Uuid::new_v4().to_string();
-        
+
         let task = Task {
             id: task_id.clone(),
             task_type: task_type.to_string(),
@@ -41,13 +40,12 @@ impl RedisScheduler {
         };
 
         let serialized = serde_json::to_string(&task)?;
-        // 添加类型注解
-        let _: RedisResult<()> = conn.lpush(&self.queue_key, serialized).await;
+        // 添加类型注解以解决 never type fallback 问题
+        conn.lpush::<_, _, ()>(&self.queue_key, serialized).await?;
         Ok(task_id)
     }
 
     pub async fn pop(&self) -> Result<Option<Task>> {
-        // 使用新的 multiplexed 连接
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let result: Option<String> = conn.rpop(&self.queue_key, None).await?;
         match result {
