@@ -1,9 +1,13 @@
+// src/scheduler/mod.rs
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 use crate::error::Result;
+
+// 导出 memory 模块，使其始终可用
+pub mod memory;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Task {
@@ -47,7 +51,8 @@ pub trait Scheduler: Send + Sync + 'static {
     async fn dead_letter_count(&self) -> Result<usize>;
     async fn purge_expired(&self) -> Result<usize>;
 }
+// src/scheduler/mod.rs
+// ... 原有代码不变
 
-pub mod memory;
 #[cfg(feature = "redis-scheduler")]
 pub mod redis;

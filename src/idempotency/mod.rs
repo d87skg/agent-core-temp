@@ -1,30 +1,49 @@
-// src/idempotency/mod.rs
+//! # Idempotency
+//! Provides Exactly-Once execution guarantees via CRDT and Fencing Tokens.
+//! Supports in-memory and Sled backends.
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
+use crate::error::Result;
 
-pub use crate::error::Result;
-
+/// The status of a task record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordStatus {
-    Pending,    // 正在处理（锁）
-    Completed,  // 成功完成
-    Failed,     // 失败
+    /// The task is being processed (locked).
+    Pending,
+    /// The task completed successfully.
+    Completed,
+    /// The task failed.
+    Failed,
 }
 
+/// A record stored in the idempotency backend.
+///
+/// Each record corresponds to a unique task identified by `key`.
+/// The `version` field is used for optimistic concurrency control (CAS).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
+    /// Unique task identifier.
     pub key: String,
+    /// Current status.
     pub status: RecordStatus,
+    /// Result data (if completed).
     pub result: Option<Vec<u8>>,
-    pub version: u64,               // 用于 CAS
-    pub created_at: u64,             // Unix 时间戳（毫秒）
+    /// Version number for optimistic concurrency control.
+    pub version: u64,
+    /// Creation timestamp (milliseconds since epoch).
+    pub created_at: u64,
+    /// Last update timestamp.
     pub updated_at: u64,
-    pub expires_at: Option<u64>,     // 过期时间（毫秒）
-    pub owner: Option<String>,        // 持有锁的 worker 标识
+    /// Expiration time (if any).
+    pub expires_at: Option<u64>,
+    /// Owner identifier (e.g., worker ID).
+    pub owner: Option<String>,
 }
 
 impl Record {
+    /// Creates a new pending record with the given key and TTL.
     pub fn new(key: &str, owner: Option<String>, ttl: Option<Duration>) -> Self {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -43,30 +62,51 @@ impl Record {
     }
 }
 
-// ==================== Trait 定义 ====================
+/// Idempotency backend trait.
+///
+/// All methods are asynchronous and must be `Send + Sync` to be used across threads.
+/// Implementations must ensure atomicity and linearizability for the `create`, `complete`, and `fail` operations.
 #[async_trait]
 pub trait IdempotencyBackend: Send + Sync + 'static {
-    /// 创建记录（原子锁）
+    /// Attempts to create a new record.
+    ///
+    /// Returns `Ok(())` if the record did not exist and was created successfully.
+    /// Returns `Err(AgentError::Conflict)` if a record with the same key already exists.
     async fn create(&self, key: &str, owner: Option<&str>, ttl: Option<Duration>) -> Result<Record>;
 
-    /// 完成记录（CAS 基于版本号）
+    /// Marks a task as completed and stores its result.
+    ///
+    /// # Arguments
+    /// * `key` – The task identifier.
+    /// * `result` – The result data (e.g., JSON bytes).
+    /// * `expected_version` – The version the caller expects; used for CAS.
+    ///
+    /// Returns `Err(AgentError::VersionMismatch)` if the version does not match.
     async fn complete(&self, key: &str, result: Vec<u8>, expected_version: u64) -> Result<()>;
 
-    /// 标记失败（CAS 基于版本号）
+    /// Marks a task as failed with an error message.
+    ///
+    /// Similar to `complete`, but stores an error message instead of a result.
     async fn fail(&self, key: &str, error_msg: &str, expected_version: u64) -> Result<()>;
 
-    /// 获取记录
+    /// Retrieves a record, if it exists.
     async fn get(&self, key: &str) -> Result<Option<Record>>;
 
-    /// 删除记录
+    /// Deletes a record.
     async fn delete(&self, key: &str) -> Result<()>;
 
-    /// 清理过期记录
+    /// Purges expired records.
+    ///
+    /// Returns the number of records removed.
     async fn purge_expired(&self) -> Result<usize>;
 
-    /// 释放超时锁（将 Pending 状态超过 ttl 的记录删除或标记为可重试）
+    /// Releases locks that have timed out.
+    ///
+    /// Records that have been in `Pending` state for longer than `timeout` are removed.
     async fn release_timed_out_locks(&self, timeout: Duration) -> Result<usize>;
 }
-pub mod memory;
+
 #[cfg(feature = "sled-storage")]
 pub mod sled;
+
+pub mod memory;
