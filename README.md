@@ -46,3 +46,20 @@ flowchart TB
     B -.-> D
     E -.-> B
     D --> F
+
+    ## 🧩 WASM 宿主函数
+
+agent-core 为 WASM 插件提供了以下宿主函数，所有函数遵循能力基安全模型（默认拒绝，需显式授权）：
+
+| 函数名 | 描述 | 安全限制 |
+|--------|------|----------|
+| `log` | 输出日志 | 无 |
+| `storage_get` / `storage_set` | 插件隔离的键值存储 | 每个插件实例独立存储 |
+| `http_get` | 发起 HTTP GET 请求 | 域名白名单、响应大小限制 |
+| `workspace_write` | 写入文件到工作区 | 路径必须相对，禁止 `..`，大小限制 10MB |
+| `workspace_list` | 列出工作区目录内容 | 路径必须相对，返回 JSON 数组 |
+| `env_get` | 获取环境变量 | 仅允许预设的键名 |
+| `random_bytes` | 生成加密安全随机数 | 无 |
+| `sleep_ms` | 延迟执行（阻塞） | 最大 10 秒 |
+
+详细说明和调用示例请参阅 [WASM 宿主函数文档](docs/wasm_host_functions.md)。

@@ -11,14 +11,23 @@ use serde_json::Value;
 
 use super::Extension;
 
+/// Host state shared with WASM modules.
 pub struct HostState {
+    /// Maximum memory allowed for the WASM module (bytes).
     pub memory_limit: usize,
+    /// CPU fuel limit (instructions).
     pub fuel_limit: u64,
+    /// Isolated key-value storage for each module instance.
     pub storage: Arc<Mutex<HashMap<String, String>>>,
+    /// Logger callback.
     pub logger: Arc<dyn Fn(&str, u32) + Send + Sync>,
+    /// Allowed HTTP domain prefixes.
     pub http_allowlist: Vec<String>,
+    /// Allowed environment variable keys.
     pub env_allowlist: Vec<String>,
+    /// Workspace root directory for file operations.
     pub workspace_root: Option<PathBuf>,
+    /// Maximum allowed response body size (bytes).
     pub max_body_size: usize,
 }
 
@@ -37,6 +46,12 @@ impl ResourceLimiter for HostState {
     }
 }
 
+/// Log a message from the WASM module.
+///
+/// # Arguments
+/// * `level` – log level (0 = error, 1 = info, others = debug)
+/// * `msg_ptr` – pointer to message string in WASM memory
+/// * `msg_len` – length of the message string
 fn host_log(
     mut caller: wasmtime::Caller<'_, HostState>,
     level: u32,
@@ -64,6 +79,16 @@ fn host_log(
     (caller.data().logger)(&msg, level);
 }
 
+/// Read a value from the module's isolated storage.
+///
+/// # Arguments
+/// * `key_ptr` – pointer to key string in WASM memory
+/// * `key_len` – length of key
+/// * `ret_ptr` – pointer to buffer where value will be written
+/// * `ret_len_ptr` – pointer to a 4-byte location where the actual length will be stored
+///
+/// # Returns
+/// 0 on success, -1 on error.
 fn host_storage_get(
     mut caller: wasmtime::Caller<'_, HostState>,
     key_ptr: u32,
@@ -119,6 +144,16 @@ fn host_storage_get(
     0
 }
 
+/// Write a value to the module's isolated storage.
+///
+/// # Arguments
+/// * `key_ptr` – pointer to key string
+/// * `key_len` – key length
+/// * `val_ptr` – pointer to value data
+/// * `val_len` – value length
+///
+/// # Returns
+/// 0 on success, -1 on error.
 fn host_storage_set(
     mut caller: wasmtime::Caller<'_, HostState>,
     key_ptr: u32,
@@ -148,7 +183,11 @@ fn host_storage_set(
     0
 }
 
-// ====================== 辅助函数 ======================
+// ====================== Helper Functions ======================
+
+/// Read a UTF-8 string from WASM memory, with bounds checking.
+///
+/// Returns `Ok(string)` on success, `Err(-1)` on failure.
 fn read_string_from_memory(
     mem: &wasmtime::Memory,
     store: &impl wasmtime::AsContext,
@@ -164,7 +203,21 @@ fn read_string_from_memory(
     Ok(String::from_utf8_lossy(&data[start..end]).to_string())
 }
 
-/// 同步 HTTP GET 宿主函数（简化版：返回模拟数据，且返回 i32 0）
+/// Perform an HTTP GET request (mock implementation for testing).
+///
+/// # Arguments
+/// * `url_ptr` – pointer to URL string
+/// * `url_len` – URL length
+/// * `_headers_ptr` – (unused) pointer to headers
+/// * `_headers_len` – (unused) headers length
+/// * `ret_ptr` – buffer for response body
+/// * `ret_len_ptr` – where to store actual response length
+///
+/// # Returns
+/// 0 on success, wasmtime::Error on failure.
+///
+/// # Security
+/// Only URLs whose prefixes are in `http_allowlist` are allowed.
 fn host_http_get(
     mut caller: wasmtime::Caller<'_, HostState>,
     url_ptr: u32,
@@ -194,7 +247,7 @@ fn host_http_get(
         return Err(wasmtime::Error::msg("URL not allowed"));
     }
 
-    // 模拟返回数据（一个简单的 JSON 字符串）
+    // Mock response (simulates httpbin.org/get)
     let mock_body = format!(r#"{{"url":"{}","method":"GET","origin":"127.0.0.1"}}"#, url);
     let body = mock_body.into_bytes();
 
@@ -222,7 +275,21 @@ fn host_http_get(
     Ok(0)
 }
 
-/// 写入工作区文件
+/// Write a file inside the workspace.
+///
+/// # Arguments
+/// * `path_ptr` – pointer to relative path string
+/// * `path_len` – path length
+/// * `content_ptr` – pointer to data to write
+/// * `content_len` – data length
+///
+/// # Returns
+/// 0 on success, wasmtime::Error on failure.
+///
+/// # Security
+/// - Path must be relative and stay within `workspace_root`.
+/// - Parent directories are created automatically.
+/// - Maximum file size is 10 MB.
 fn host_workspace_write(
     mut caller: wasmtime::Caller<'_, HostState>,
     path_ptr: u32,
@@ -252,6 +319,7 @@ fn host_workspace_write(
         }
     };
 
+    // Prevent path traversal
     if path_str.starts_with('/') || path_str.starts_with("..") || path_str.contains("../") {
         eprintln!("Invalid path: {}", path_str);
         return Err(wasmtime::Error::msg("path not allowed"));
@@ -259,6 +327,7 @@ fn host_workspace_write(
 
     let full_path = workspace_root.join(&path_str);
 
+    // Ensure parent directory exists
     if let Some(parent) = full_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| {
@@ -268,6 +337,7 @@ fn host_workspace_write(
         }
     }
 
+    // Canonicalize path to check it stays inside workspace
     if let Ok(canonicalized) = full_path.canonicalize() {
         if !canonicalized.starts_with(workspace_root) {
             eprintln!("Path escapes workspace: {}", canonicalized.display());
@@ -303,7 +373,19 @@ fn host_workspace_write(
     }
 }
 
-/// 列出工作区目录内容
+/// List contents of a workspace directory.
+///
+/// # Arguments
+/// * `path_ptr` – pointer to relative path string
+/// * `path_len` – path length
+/// * `ret_ptr` – buffer for JSON array of filenames
+/// * `ret_len_ptr` – where to store actual JSON length
+///
+/// # Returns
+/// 0 on success, wasmtime::Error on failure.
+///
+/// # Security
+/// Path must be relative and stay within `workspace_root`.
 fn host_workspace_list(
     mut caller: wasmtime::Caller<'_, HostState>,
     path_ptr: u32,
@@ -393,7 +475,19 @@ fn host_workspace_list(
     Ok(0)
 }
 
-/// 获取环境变量（白名单控制）
+/// Get an environment variable (subject to allowlist).
+///
+/// # Arguments
+/// * `key_ptr` – pointer to variable name
+/// * `key_len` – name length
+/// * `ret_ptr` – buffer for value
+/// * `ret_len_ptr` – where to store actual value length
+///
+/// # Returns
+/// 0 on success, wasmtime::Error on failure.
+///
+/// # Security
+/// Only keys listed in `env_allowlist` are accessible.
 fn host_env_get(
     mut caller: wasmtime::Caller<'_, HostState>,
     key_ptr: u32,
@@ -451,7 +545,15 @@ fn host_env_get(
     Ok(0)
 }
 
-/// 生成随机字节
+/// Generate cryptographically secure random bytes.
+///
+/// # Arguments
+/// * `len` – number of random bytes to generate
+/// * `ret_ptr` – buffer where bytes will be placed
+/// * `ret_len_ptr` – where to store actual length (same as len on success)
+///
+/// # Returns
+/// 0 on success, wasmtime::Error on failure.
 fn host_random_bytes(
     mut caller: wasmtime::Caller<'_, HostState>,
     len: u32,
@@ -482,7 +584,6 @@ fn host_random_bytes(
 
     data[ret_start..ret_end].copy_from_slice(&bytes);
 
-    // 写入长度
     let len_ptr = ret_len_ptr as usize;
     if len_ptr + 4 <= data.len() {
         let len_bytes = (len as u32).to_le_bytes();
@@ -492,9 +593,15 @@ fn host_random_bytes(
     Ok(0)
 }
 
-/// 延迟执行（阻塞），参数为毫秒（u32）
+/// Sleep (block) for the specified number of milliseconds.
+///
+/// # Arguments
+/// * `ms` – sleep duration in milliseconds (max 10000)
+///
+/// # Returns
+/// 0 on success, wasmtime::Error if duration exceeds limit.
 fn host_sleep_ms(
-    caller: wasmtime::Caller<'_, HostState>,
+    _caller: wasmtime::Caller<'_, HostState>,
     ms: u32,
 ) -> Result<i32, wasmtime::Error> {
     const MAX_SLEEP_MS: u32 = 10000;
