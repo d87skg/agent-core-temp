@@ -29,6 +29,9 @@ async fn test_cpu_limit_prevents_infinite_loop() {
         64 * 1024 * 1024,
         100_000,
         test_logger(),
+        vec![],
+        None,
+        1024 * 1024,
     ).expect("failed to load plugin");
 
     let start = std::time::Instant::now();
@@ -65,6 +68,9 @@ async fn test_memory_limit_prevents_bomb() {
         2 * 65536,
         10_000_000,
         test_logger(),
+        vec![],
+        None,
+        1024 * 1024,
     ).expect("failed to load plugin");
 
     let result = plugin.call("grow_memory", serde_json::json!(null));
@@ -96,6 +102,9 @@ async fn test_unregistered_host_function_fails() {
         64 * 1024 * 1024,
         10_000_000,
         test_logger(),
+        vec![],
+        None,
+        1024 * 1024,
     );
     assert!(result.is_err(), "未注册的导入应导致加载失败");
 }
@@ -142,6 +151,9 @@ async fn test_storage_isolation() {
         64 * 1024 * 1024,
         10_000_000,
         test_logger(),
+        vec![],
+        None,
+        1024 * 1024,
     ).expect("failed to load plugin1");
     plugin1.call("write", serde_json::json!(null)).expect("write failed");
 
@@ -152,6 +164,9 @@ async fn test_storage_isolation() {
         64 * 1024 * 1024,
         10_000_000,
         test_logger(),
+        vec![],
+        None,
+        1024 * 1024,
     ).expect("failed to load plugin2");
     let _result = plugin2.call("read", serde_json::json!(null)).expect("read failed");
 }
@@ -183,7 +198,53 @@ async fn test_host_function_robustness() {
         64 * 1024 * 1024,
         10_000_000,
         test_logger(),
+        vec![],
+        None,
+        1024 * 1024,
     ).expect("failed to load plugin");
 
     let _result = plugin.call("bad_log", serde_json::json!(null));
+}
+
+// ==================== 修复后的 http_get 测试 ====================
+#[tokio::test]
+async fn test_http_get_basic() {
+    let wat = r#"
+    (module
+      (import "host" "http_get" (func $http_get (param i32 i32 i32 i32 i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (data (i32.const 0) "https://httpbin.org/get")
+      (func (export "run_test") (result i32)
+        i32.const 0      ;; url_ptr
+        i32.const 22     ;; url_len
+        i32.const 0      ;; headers_ptr
+        i32.const 0      ;; headers_len
+        i32.const 1024   ;; ret_ptr
+        i32.const 2048   ;; ret_len_ptr
+        call $http_get
+        drop              ;; 丢弃宿主函数返回值（如果有）
+        i32.const 0       ;; 返回 0
+      )
+    )
+    "#;
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let wasm_path = temp_dir.path().join("http_test.wasm");
+    std::fs::write(&wasm_path, wasm).expect("failed to write wasm file");
+
+    let plugin = load_wasm_plugin(
+        wasm_path.to_str().unwrap(),
+        "http_test".to_string(),
+        "1.0".to_string(),
+        64 * 1024 * 1024,
+        10_000_000,
+        test_logger(),
+        vec!["https://httpbin.org".to_string()],
+        None,
+        1024 * 1024,
+    ).expect("failed to load plugin");
+
+    let result = plugin.call("run_test", serde_json::json!(null));
+    assert!(result.is_ok(), "http_get call failed: {:?}", result.err());
 }

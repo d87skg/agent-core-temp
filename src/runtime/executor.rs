@@ -1,4 +1,3 @@
-// src/runtime/executor.rs
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Semaphore as TokioSemaphore;
@@ -7,6 +6,7 @@ use std::collections::HashMap;
 use crate::observability;
 
 pub struct ParallelExecutor {
+    #[allow(dead_code)]
     max_concurrent: usize,
     semaphore: Arc<TokioSemaphore>,
     tasks: Arc<RwLock<HashMap<String, TaskHandle>>>,

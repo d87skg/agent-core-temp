@@ -52,6 +52,9 @@ async-trait = "0.1"
 lru = "0.10"
 wat = "1.0"
 rand = "0.8"
+url = "2.5"
+# 新增 HTTP 客户端
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
 
 # 可选依赖
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
@@ -65,8 +68,7 @@ predicates = "3.0"
 rand = "0.8"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 proptest = "1.5"
-reqwest = { version = "0.11", features = ["json"] }
-wat = "1.0"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] } # 用于测试
 
 [features]
 default = []

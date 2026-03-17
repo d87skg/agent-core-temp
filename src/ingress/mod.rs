@@ -23,11 +23,12 @@ pub struct RunRequest {
 #[derive(Debug, Deserialize)]
 pub struct IntentPayload {
     #[serde(rename = "type")]
-    intent_type: String,
-    to: Option<String>,
-    amount: Option<u64>,
-    asset: Option<String>,
-    from: Option<String>,
+    pub intent_type: String,
+    pub to: Option<String>,
+    pub amount: Option<u64>,
+    pub asset: Option<String>,
+    #[allow(dead_code)]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,8 +40,9 @@ pub struct RunResponse {
 // ---------- 应用状态 ----------
 #[derive(Clone)]
 pub struct AppState {
+    #[allow(dead_code)]
     compiler: Arc<SimpleCompiler>,
-    scheduler: Arc<dyn Scheduler>,
+    pub scheduler: Arc<dyn Scheduler>,
 }
 
 // ---------- HTTP 处理函数 ----------
