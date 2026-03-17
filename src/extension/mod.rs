@@ -10,7 +10,6 @@ pub trait Extension: Send + Sync {
 pub fn load_extension(path: &str) -> Result<Box<dyn Extension>, Box<dyn std::error::Error>> {
     if path.ends_with(".wasm") {
         use std::sync::Arc;
-        // 注意：这里不再需要 PathBuf
         
         let logger = Arc::new(|msg: &str, level: u32| {
             match level {
@@ -24,12 +23,13 @@ pub fn load_extension(path: &str) -> Result<Box<dyn Extension>, Box<dyn std::err
             path,
             "wasm-plugin".to_string(),
             "1.0".to_string(),
-            64 * 1024 * 1024,  // 64MB
-            10_000_000,         // 10M fuel
+            64 * 1024 * 1024,
+            10_000_000,
             logger,
-            vec![],               // http_allowlist 空
-            None,                 // workspace_root 无
-            1024 * 1024,          // max_body_size 1MB
+            vec![],
+            vec![],
+            None,
+            1024 * 1024,
         )
     } else {
         Err("Unsupported extension type".into())
