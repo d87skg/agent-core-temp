@@ -1,0 +1,12 @@
+**/target
+**/target/
+**/*.exe
+**/*.pdb
+**/*.dll
+**/*.rlib
+.git/
+*.md
+Dockerfile
+docker-compose.yml
+data/
+zeroclaw/

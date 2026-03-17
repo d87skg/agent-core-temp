@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:latest
+    container_name: agent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - redis-socket:/var/run/redis
+    command: redis-server --unixsocket /var/run/redis/redis.sock --unixsocketperm 700 --port 6379
+    networks:
+      - agent-network
+
+  agent-core:
+    build: .
+    container_name: agent-core
+    depends_on:
+      - redis
+    ports:
+      - "3000:3000"
+    volumes:
+      - sled-data:/data/sled
+      - redis-socket:/var/run/redis:ro
+    environment:
+      - SCHEDULER_TYPE=redis
+      - REDIS_URL=unix:///var/run/redis/redis.sock
+      - IDEMPOTENCY_STORAGE=sled
+      - SLED_PATH=/data/sled
+    networks:
+      - agent-network
+
+volumes:
+  redis-data:
+  redis-socket:
+  sled-data:
+
+networks:
+  agent-network:
+    driver: bridge
