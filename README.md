@@ -63,3 +63,9 @@ agent-core 为 WASM 插件提供了以下宿主函数，所有函数遵循能力
 | `sleep_ms` | 延迟执行（阻塞） | 最大 10 秒 |
 
 详细说明和调用示例请参阅 [WASM 宿主函数文档](docs/wasm_host_functions.md)。
+
+### Redis 调度器可靠性保证
+- **原子操作**：`nack` 使用 Redis pipeline 保证 XACK 和 XADD 的原子性，避免状态不一致。
+- **死信队列**：超过最大重试次数的任务自动移入死信队列 `{stream}:dead`，可通过 API 监控。
+- **监控指标**：通过 Prometheus 暴露任务计数、死信队列长度、操作失败次数等（参见 `/metrics`）。
+- **配置参数**：支持 `max_retries` 设置最大重试次数。

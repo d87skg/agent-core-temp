@@ -55,6 +55,7 @@ rand = "0.8"
 url = "2.5"
 # 新增 HTTP 客户端
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
+backon = "1.5.0"
 
 # 可选依赖
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }

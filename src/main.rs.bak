@@ -11,8 +11,10 @@ use agent_core_temp::idempotency::sled::SledBackend;
 use anyhow::Result;
 use std::env;
 use std::sync::Arc;
+use std::collections::HashSet;
 use tracing_subscriber;
 use rand::Rng;
+use reqwest; // 用于回调
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,7 +27,21 @@ async fn main() -> Result<()> {
     observability::init_observability()?;
     println!("✅ Observability initialized");
 
-    // 1. 选择调度器后端
+    // ==================== 认证配置 ====================
+    let api_keys: HashSet<String> = env::var("API_KEYS")
+        .unwrap_or_else(|_| "".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if api_keys.is_empty() {
+        println!("⚠️  No API keys configured. Authentication disabled.");
+    } else {
+        println!("🔑 Loaded {} API key(s)", api_keys.len());
+    }
+    let api_keys = Arc::new(api_keys);
+
+    // ==================== 调度器选择 ====================
     let scheduler_type = env::var("SCHEDULER_TYPE").unwrap_or_else(|_| "memory".to_string());
     let scheduler: Arc<dyn Scheduler> = match scheduler_type.as_str() {
         "memory" => {
@@ -43,7 +59,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    // 2. 选择幂等性存储后端
+    // ==================== 幂等性存储选择 ====================
     let storage_type = env::var("IDEMPOTENCY_STORAGE").unwrap_or_else(|_| "memory".to_string());
     let _idempotency_backend: Arc<dyn IdempotencyBackend> = match storage_type.as_str() {
         "memory" => {
@@ -60,34 +76,43 @@ async fn main() -> Result<()> {
             anyhow::bail!("Unknown idempotency storage type: {}", storage_type);
         }
     };
-    // 注意：幂等性存储目前未传入 ingress，仅用于演示。后续可扩展 ingress 使用它。
 
-    // 3. 启动 worker 循环（消费任务）
+    // ==================== 启动 worker 循环 ====================
     let worker_scheduler = scheduler.clone();
     tokio::spawn(async move {
+        let client = reqwest::Client::new();
         loop {
             if let Some(task) = worker_scheduler.pop().await.unwrap() {
                 println!("👷 Worker got task: {}", task.id);
-                if rand::thread_rng().gen_bool(0.5) {
+                // 模拟执行（实际应调用 WASM 等）
+                let success = rand::thread_rng().gen_bool(0.5);
+                let result = if success {
+                    println!("✅ Task {} succeeded", task.id);
                     worker_scheduler.ack(&task.id).await.unwrap();
-                    println!("✅ Task {} acked", task.id);
+                    Some("success".to_string())
                 } else {
+                    println!("❌ Task {} failed", task.id);
                     worker_scheduler.nack(&task.id, "simulated error").await.unwrap();
-                    println!("❌ Task {} nacked", task.id);
+                    None
+                };
+
+                // 回调通知
+                if let Some(callback_url) = task.callback_url {
+                    let status = if success { "completed" } else { "failed" };
+                    let payload = serde_json::json!({
+                        "task_id": task.id,
+                        "status": status,
+                        "result": result,
+                    });
+                    let _ = client.post(&callback_url).json(&payload).send().await;
                 }
             }
-
-            // 环境变量控制模拟延迟：设置 DISABLE_SIMULATED_DELAY=1 时跳过 sleep，用于压测
-            if std::env::var("DISABLE_SIMULATED_DELAY").is_ok() {
-                // 压测模式：不 sleep，仅让出 CPU 避免完全占满
-                tokio::task::yield_now().await;
-            } else {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     });
 
+    // ==================== 启动 ingress 服务器 ====================
     println!("🚀 Starting agent-core ingress server...");
-    ingress::start_server(scheduler).await?;
+    ingress::start_server(scheduler, api_keys).await?;
     Ok(())
 }

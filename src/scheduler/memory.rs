@@ -120,6 +120,7 @@ impl Scheduler for MemoryScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;  // 将 Duration 导入放在测试模块内
     use tokio::time;
 
     #[tokio::test]

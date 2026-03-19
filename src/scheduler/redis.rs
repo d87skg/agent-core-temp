@@ -1,3 +1,13 @@
+//! Redis-based distributed task scheduler using Redis Streams.
+//!
+//! This scheduler provides reliable task delivery with at-least-once semantics,
+//! automatic retries, and a dead letter queue for failed tasks. It exposes
+//! Prometheus metrics for monitoring.
+//!
+//! # Reliability guarantees
+//! - Atomic NACK with XACK and XADD using pipeline.
+//! - Tasks exceeding `max_retries` are moved to dead letter queue.
+//! - Metrics for monitoring task flow and failures.
 use super::{Scheduler, Task};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -5,10 +15,10 @@ use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client, RedisResult, pipe};
 use serde_json;
 use std::sync::Arc;
-use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{AgentError, Result};
+use crate::observability;
 
 pub struct RedisScheduler {
     conn: ConnectionManager,
@@ -67,10 +77,11 @@ impl Scheduler for RedisScheduler {
     async fn submit(&self, task: Task) -> Result<String> {
         let mut conn = self.conn.clone();
         let serialized = Self::serialize_task(&task)?;
-        let _: String = conn
-            .xadd(&self.stream_key, "*", &[("task", serialized)])
+        // 显式指定 xadd 的返回类型为 ()，解决 never type 回退错误
+        conn.xadd::<_, _, _, _, ()>(&self.stream_key, "*", &[("task", serialized)])
             .await
             .map_err(|e| AgentError::Queue(format!("Redis XADD error: {}", e)))?;
+        observability::REDIS_TASKS_SUBMITTED.increment(1);
         debug!("Submitted task: {}", task.id);
         Ok(task.id)
     }
@@ -99,17 +110,18 @@ impl Scheduler for RedisScheduler {
                         for (key, val) in fields {
                             if key == "task" {
                                 let task = Self::deserialize_task(&val)?;
-                                // 克隆 entry_id 用于日志，避免移动后使用
-                                let entry_id_clone = entry_id.clone();
                                 self.pending_tasks.insert(task.id.clone(), (entry_id, task.clone()));
-                                debug!("Popped pending task: {} with message ID {}", task.id, entry_id_clone);
+                                observability::REDIS_TASKS_POPPED.increment(1);
                                 return Ok(Some(task));
                             }
                         }
                     }
                 }
             }
-            Err(e) => warn!("Error reading pending messages: {}", e),
+            Err(e) => {
+                observability::REDIS_OPERATION_FAILURES.increment(1);
+                warn!("Error reading pending messages: {}", e);
+            }
         }
 
         // 2. 读取新消息
@@ -135,9 +147,8 @@ impl Scheduler for RedisScheduler {
                         for (key, val) in fields {
                             if key == "task" {
                                 let task = Self::deserialize_task(&val)?;
-                                let entry_id_clone = entry_id.clone();
                                 self.pending_tasks.insert(task.id.clone(), (entry_id, task.clone()));
-                                debug!("Popped new task: {} with message ID {}", task.id, entry_id_clone);
+                                observability::REDIS_TASKS_POPPED.increment(1);
                                 return Ok(Some(task));
                             }
                         }
@@ -146,6 +157,7 @@ impl Scheduler for RedisScheduler {
                 Ok(None)
             }
             Err(e) => {
+                observability::REDIS_OPERATION_FAILURES.increment(1);
                 warn!("XREADGROUP error: {}", e);
                 Ok(None)
             }
@@ -160,13 +172,11 @@ impl Scheduler for RedisScheduler {
                 .await
                 .map_err(|e| AgentError::Queue(format!("Redis XACK error: {}", e)))?;
             if num_acked == 1 {
+                observability::REDIS_TASKS_ACKED.increment(1);
                 debug!("ACK success for task {}, message ID {}", task_id, message_id);
             } else {
                 error!("XACK expected 1, got {} for task {} message ID {}", num_acked, task_id, message_id);
-                return Err(AgentError::Queue(format!(
-                    "XACK expected 1, got {}",
-                    num_acked
-                )));
+                return Err(AgentError::Queue(format!("XACK expected 1, got {}", num_acked)));
             }
         } else {
             warn!("ack: task {} not found in pending_tasks", task_id);
@@ -182,30 +192,32 @@ impl Scheduler for RedisScheduler {
             task.last_error = Some(error_msg.to_string());
             info!("Task {} nacked, retry count now {}", task_id, task.retry_count);
 
+            let serialized = Self::serialize_task(&task)?;
+            let mut pipe = pipe();
+
+            // 始终 XACK 原消息
+            pipe.xack(&self.stream_key, &self.consumer_group, &[message_id.as_str()]);
+
             if task.retry_count >= self.max_retries {
-                // 移入死信队列：只需一次 XADD
-                let serialized = Self::serialize_task(&task)?;
-                let _: String = conn
-                    .xadd(&self.dead_letter_key, "*", &[("task", serialized)])
-                    .await
-                    .map_err(|e| AgentError::Queue(format!("Redis XADD to dead letter error: {}", e)))?;
-                info!("Task {} moved to dead letter", task_id);
+                pipe.xadd(&self.dead_letter_key, "*", &[("task", serialized.as_str())]);
             } else {
-                // 重新提交：使用 pipeline 合并 XACK 和 XADD
-                let serialized = Self::serialize_task(&task)?;
-                let mut pipe = pipe();
-                pipe
-                    .xack(&self.stream_key, &self.consumer_group, &[message_id.as_str()])
-                    .xadd(&self.stream_key, "*", &[("task", serialized.as_str())]);
+                pipe.xadd(&self.stream_key, "*", &[("task", serialized.as_str())]);
+            }
 
-                let (acked, new_message_id): (usize, String) = pipe
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(|e| AgentError::Queue(format!("Redis pipeline error: {}", e)))?;
+            let results: (usize, String) = pipe
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| AgentError::Queue(format!("Redis pipeline error: {}", e)))?;
 
-                if acked != 1 {
-                    error!("XACK expected 1, got {} for task {} message ID {}", acked, task_id, message_id);
-                }
+            let (acked, new_message_id) = results;
+            if acked != 1 {
+                error!("XACK expected 1, got {} for task {} message ID {}", acked, task_id, message_id);
+            }
+
+            observability::REDIS_TASKS_NACKED.increment(1);
+            if task.retry_count >= self.max_retries {
+                info!("Task {} moved to dead letter with new ID {}", task_id, new_message_id);
+            } else {
                 debug!("Re-submitted task {} with new message ID {}", task_id, new_message_id);
             }
         } else {
@@ -216,7 +228,11 @@ impl Scheduler for RedisScheduler {
 
     async fn dead_letter_count(&self) -> Result<usize> {
         let mut conn = self.conn.clone();
-        let len: u64 = conn.xlen(&self.dead_letter_key).await.unwrap_or(0);
+        let len: u64 = conn
+            .xlen(&self.dead_letter_key)
+            .await
+            .map_err(|e| AgentError::Queue(format!("Redis XLEN error: {}", e)))?;
+        observability::REDIS_DEAD_LETTER_SIZE.set(len as f64);
         Ok(len as usize)
     }
 

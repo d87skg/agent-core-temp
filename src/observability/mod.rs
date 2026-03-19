@@ -1,8 +1,10 @@
 // src/observability/mod.rs
 use metrics::{describe_counter, describe_gauge, describe_histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use once_cell::sync::Lazy;
 use std::sync::OnceLock;
 use anyhow::Result;
+use metrics::{Counter, Gauge};  // 移除 Histogram，因为它未使用
 
 static PROMETHEUS_HANDLE: OnceLock<Result<PrometheusHandle, anyhow::Error>> = OnceLock::new();
 
@@ -39,9 +41,16 @@ pub fn register_static_metrics() {
     describe_counter!("agent.wasm.plugins_loaded", "WASM plugins loaded");
     describe_counter!("agent.wasm.fuel_consumed", "WASM fuel consumed");
     describe_histogram!("agent.wasm_exec_duration_ms", "WASM execution duration");
+
+    // Redis 调度器相关指标描述
+    describe_counter!("redis_tasks_submitted_total", "Number of tasks submitted to Redis");
+    describe_counter!("redis_tasks_popped_total", "Number of tasks popped from Redis");
+    describe_counter!("redis_tasks_acked_total", "Number of tasks acked");
+    describe_counter!("redis_tasks_nacked_total", "Number of tasks nacked");
+    describe_gauge!("redis_dead_letter_size", "Current size of dead letter queue");
+    describe_counter!("redis_operation_failures_total", "Number of Redis operation failures");
 }
 
-/// 初始化 Prometheus recorder，但不启动 HTTP 服务器
 pub fn init_observability() -> Result<()> {
     let result = PROMETHEUS_HANDLE.get_or_init(|| {
         let builder = PrometheusBuilder::new();
@@ -59,7 +68,6 @@ pub fn init_observability() -> Result<()> {
     }
 }
 
-/// 获取 Prometheus 句柄，用于生成 metrics 响应
 pub fn prometheus_handle() -> Option<&'static PrometheusHandle> {
     PROMETHEUS_HANDLE.get().and_then(|res| res.as_ref().ok())
 }
@@ -110,3 +118,29 @@ pub fn increment_tasks_failed() {
 pub fn record_request_duration(seconds: f64) {
     metrics!(histogram, "agent.request_duration_seconds", seconds);
 }
+
+// ====================== Redis 调度器监控指标 ======================
+
+pub static REDIS_TASKS_SUBMITTED: Lazy<Counter> = Lazy::new(|| {
+    metrics::counter!("redis_tasks_submitted_total")
+});
+
+pub static REDIS_TASKS_POPPED: Lazy<Counter> = Lazy::new(|| {
+    metrics::counter!("redis_tasks_popped_total")
+});
+
+pub static REDIS_TASKS_ACKED: Lazy<Counter> = Lazy::new(|| {
+    metrics::counter!("redis_tasks_acked_total")
+});
+
+pub static REDIS_TASKS_NACKED: Lazy<Counter> = Lazy::new(|| {
+    metrics::counter!("redis_tasks_nacked_total")
+});
+
+pub static REDIS_DEAD_LETTER_SIZE: Lazy<Gauge> = Lazy::new(|| {
+    metrics::gauge!("redis_dead_letter_size")
+});
+
+pub static REDIS_OPERATION_FAILURES: Lazy<Counter> = Lazy::new(|| {
+    metrics::counter!("redis_operation_failures_total")
+});

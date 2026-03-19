@@ -1,11 +1,21 @@
+use agent_core_temp::scheduler::redis::RedisScheduler;
+use agent_core_temp::scheduler::Task;
+use agent_core_temp::scheduler::Scheduler;
+
 #[tokio::test]
 async fn test_redis_scheduler_retry_and_dead_letter() {
+    // 建立 Redis 连接并清空数据库，确保测试环境干净
+    let client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    // 显式指定 FLUSHDB 的返回类型为 ()，避免类型推断错误
+    redis::cmd("FLUSHDB").query_async::<()>(&mut conn).await.unwrap();
+
     let scheduler = RedisScheduler::new(
         "redis://127.0.0.1:6379",
         "test-stream",
         "test-group",
         "test-worker",
-        3,
+        3, // max_retries
     )
     .await
     .unwrap();
