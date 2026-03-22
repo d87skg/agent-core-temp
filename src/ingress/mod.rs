@@ -1,6 +1,6 @@
 use crate::observability;
 use crate::scheduler::Scheduler;
-use crate::workflow::{Intent, SimpleCompiler};
+use crate::workflow::{Intent, SimpleCompiler, ParallelExecutor, WorkflowCompiler, WorkflowExecutor};
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 // ---------- 请求/响应结构体 ----------
-
 #[derive(Debug, Deserialize)]
 pub struct RunRequest {
     intent: IntentPayload,
@@ -27,14 +26,24 @@ pub struct IntentPayload {
     pub to: Option<String>,
     pub amount: Option<u64>,
     pub asset: Option<String>,
-    #[allow(dead_code)]
     pub from: Option<String>,
+    // 新字段用于测试意图
+    pub text: Option<String>,
+    pub url: Option<String>,
+    pub body: Option<String>,
+    pub path: Option<String>,
+    pub confirm: Option<String>,
+    pub resource: Option<String>,
+    pub action: Option<String>,
+    pub tokens: Option<u64>,
+    pub cost_cents: Option<u64>,
+    pub query: Option<String>,  // 用于 web_search
 }
 
 #[derive(Debug, Serialize)]
 pub struct RunResponse {
-    task_id: String,
-    status: String,
+    pub task_ids: Vec<String>,
+    pub status: String,
 }
 
 // ---------- 应用状态 ----------
@@ -43,61 +52,93 @@ pub struct AppState {
     #[allow(dead_code)]
     compiler: Arc<SimpleCompiler>,
     pub scheduler: Arc<dyn Scheduler>,
+    pub executor: Arc<ParallelExecutor>,
+}
+
+// ---------- 辅助函数：将请求转换为 Intent ----------
+fn parse_intent(payload: &IntentPayload) -> Result<Intent> {
+    match payload.intent_type.as_str() {
+        "transfer" => Ok(Intent::Transfer {
+            to: payload.to.clone().unwrap_or_default(),
+            amount: payload.amount.unwrap_or(0),
+            asset: payload.asset.clone().unwrap_or_default(),
+        }),
+        "echo_text" => Ok(Intent::EchoText {
+            text: payload.text.clone().unwrap_or_default(),
+        }),
+        "http_post" => Ok(Intent::HttpPost {
+            url: payload.url.clone().unwrap_or_default(),
+            body: payload.body.clone(),
+        }),
+        "workspace_read" => Ok(Intent::WorkspaceRead {
+            path: payload.path.clone().unwrap_or_default(),
+        }),
+        "workspace_delete" => Ok(Intent::WorkspaceDelete {
+            path: payload.path.clone().unwrap_or_default(),
+            confirm: payload.confirm.clone().unwrap_or_else(|| "no".to_string()),
+        }),
+        "permission_check" => Ok(Intent::PermissionCheck {
+            resource: payload.resource.clone().unwrap_or_default(),
+            action: payload.action.clone().unwrap_or_default(),
+        }),
+        "cost_tracker" => Ok(Intent::CostTracker {
+            tokens: payload.tokens.unwrap_or(0),
+            cost_cents: payload.cost_cents.unwrap_or(0),
+        }),
+        "web_search" => Ok(Intent::WebSearch {
+            query: payload.query.clone().unwrap_or_default(),
+        }),
+        "browser_open" => Ok(Intent::BrowserOpen {
+            url: payload.url.clone().unwrap_or_default(),
+        }),
+        "browser_screenshot" => Ok(Intent::BrowserScreenshot),
+        _ => Err(anyhow::anyhow!("Unsupported intent type: {}", payload.intent_type)),
+    }
 }
 
 // ---------- HTTP 处理函数 ----------
-
 async fn run_handler(
     State(state): State<AppState>,
     Json(req): Json<RunRequest>,
 ) -> impl IntoResponse {
-    // 将请求体转换为 Intent
-    let intent = match req.intent.intent_type.as_str() {
-        "transfer" => Intent::Transfer {
-            to: req.intent.to.unwrap_or_default(),
-            amount: req.intent.amount.unwrap_or(0),
-            asset: req.intent.asset.unwrap_or_default(),
-        },
-        _ => {
+    let intent = match parse_intent(&req.intent) {
+        Ok(i) => i,
+        Err(e) => {
             observability::increment_tasks_failed();
             return (
                 StatusCode::BAD_REQUEST,
                 Json(RunResponse {
-                    task_id: "".to_string(),
-                    status: "unsupported intent type".to_string(),
+                    task_ids: vec![],
+                    status: format!("Invalid intent: {}", e),
                 }),
             );
         }
     };
 
-    // 编译意图为任务（这里简化：将 Intent 序列化为 payload）
-    let payload = match serde_json::to_vec(&intent) {
-        Ok(p) => p,
+    let compiler = &state.compiler;
+    let tasks = match compiler.compile(intent).await {
+        Ok(t) => t,
         Err(e) => {
             observability::increment_tasks_failed();
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(RunResponse {
-                    task_id: "".to_string(),
-                    status: format!("serialize error: {}", e),
+                    task_ids: vec![],
+                    status: format!("Compile error: {}", e),
                 }),
             );
         }
     };
 
-    // 创建调度器任务
-    let task = crate::scheduler::Task::new("workflow", payload, 5, None);
-
-    // 提交到调度器
-    let task_id = match state.scheduler.submit(task).await {
-        Ok(id) => id,
+    let task_ids = match state.executor.execute(tasks).await {
+        Ok(ids) => ids,
         Err(e) => {
             observability::increment_tasks_failed();
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(RunResponse {
-                    task_id: "".to_string(),
-                    status: format!("scheduler submit error: {}", e),
+                    task_ids: vec![],
+                    status: format!("Execution error: {}", e),
                 }),
             );
         }
@@ -108,8 +149,8 @@ async fn run_handler(
     (
         StatusCode::OK,
         Json(RunResponse {
-            task_id,
-            status: "submitted".to_string(),
+            task_ids,
+            status: "completed".to_string(),
         }),
     )
 }
@@ -123,12 +164,16 @@ async fn metrics_handler() -> impl IntoResponse {
 }
 
 // ---------- 启动服务器 ----------
-pub async fn start_server(scheduler: Arc<dyn Scheduler>) -> Result<()> {
+pub async fn start_server(
+    scheduler: Arc<dyn Scheduler>,
+    executor: Arc<ParallelExecutor>,
+) -> Result<()> {
     let compiler = SimpleCompiler;
 
     let state = AppState {
         compiler: Arc::new(compiler),
         scheduler,
+        executor,
     };
 
     let app = Router::new()

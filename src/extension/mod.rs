@@ -1,16 +1,25 @@
+//! Extension module for loading and managing plugins
+
 pub mod wasm;
+pub mod functions;   // 新增：声明 functions 子模块
+
+use serde_json::Value;
 
 pub trait Extension: Send + Sync {
     fn name(&self) -> &str;
     fn version(&self) -> &str;
-    fn init(&self) -> Result<(), Box<dyn std::error::Error>>;
-    fn call(&self, method: &str, payload: serde_json::Value) -> Result<serde_json::Value, Box<dyn std::error::Error>>;
+    fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn call(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>>;
 }
 
-pub fn load_extension(path: &str) -> Result<Box<dyn Extension>, Box<dyn std::error::Error>> {
+pub fn load_extension(path: &str) -> Result<Box<dyn Extension>, Box<dyn std::error::Error + Send + Sync>> {
     if path.ends_with(".wasm") {
         use std::sync::Arc;
-        
+
         let logger = Arc::new(|msg: &str, level: u32| {
             match level {
                 0 => eprintln!("[WASM ERROR] {}", msg),
@@ -18,7 +27,7 @@ pub fn load_extension(path: &str) -> Result<Box<dyn Extension>, Box<dyn std::err
                 _ => eprintln!("[WASM DEBUG] {}", msg),
             }
         });
-        
+
         wasm::load_wasm_plugin(
             path,
             "wasm-plugin".to_string(),

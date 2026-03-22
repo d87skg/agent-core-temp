@@ -5,29 +5,20 @@ use std::fs;
 use std::env;
 use std::thread;
 use std::time::Duration;
-use wasmtime::{Engine, Linker, Module, Store, Instance, Config};
+use wasmtime::{Engine, Linker, Module, Store, Instance, Config, Caller, AsContext};
 use wasmtime::ResourceLimiter;
 use serde_json::Value;
 
 use super::Extension;
 
-/// Host state shared with WASM modules.
 pub struct HostState {
-    /// Maximum memory allowed for the WASM module (bytes).
     pub memory_limit: usize,
-    /// CPU fuel limit (instructions).
     pub fuel_limit: u64,
-    /// Isolated key-value storage for each module instance.
     pub storage: Arc<Mutex<HashMap<String, String>>>,
-    /// Logger callback.
     pub logger: Arc<dyn Fn(&str, u32) + Send + Sync>,
-    /// Allowed HTTP domain prefixes.
     pub http_allowlist: Vec<String>,
-    /// Allowed environment variable keys.
     pub env_allowlist: Vec<String>,
-    /// Workspace root directory for file operations.
     pub workspace_root: Option<PathBuf>,
-    /// Maximum allowed response body size (bytes).
     pub max_body_size: usize,
 }
 
@@ -46,18 +37,7 @@ impl ResourceLimiter for HostState {
     }
 }
 
-/// Log a message from the WASM module.
-///
-/// # Arguments
-/// * `level` – log level (0 = error, 1 = info, others = debug)
-/// * `msg_ptr` – pointer to message string in WASM memory
-/// * `msg_len` – length of the message string
-fn host_log(
-    mut caller: wasmtime::Caller<'_, HostState>,
-    level: u32,
-    msg_ptr: u32,
-    msg_len: u32,
-) {
+fn host_log(mut caller: Caller<'_, HostState>, level: u32, msg_ptr: u32, msg_len: u32) {
     let mem = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
         _ => {
@@ -65,62 +45,37 @@ fn host_log(
             return;
         }
     };
-
     let data = mem.data(&caller);
     let start = msg_ptr as usize;
     let end = start + msg_len as usize;
-
     if end > data.len() {
         eprintln!("host_log: message out of bounds");
         return;
     }
-
     let msg = String::from_utf8_lossy(&data[start..end]);
     (caller.data().logger)(&msg, level);
 }
 
-/// Read a value from the module's isolated storage.
-///
-/// # Arguments
-/// * `key_ptr` – pointer to key string in WASM memory
-/// * `key_len` – length of key
-/// * `ret_ptr` – pointer to buffer where value will be written
-/// * `ret_len_ptr` – pointer to a 4-byte location where the actual length will be stored
-///
-/// # Returns
-/// 0 on success, -1 on error.
-fn host_storage_get(
-    mut caller: wasmtime::Caller<'_, HostState>,
-    key_ptr: u32,
-    key_len: u32,
-    ret_ptr: u32,
-    ret_len_ptr: u32,
-) -> i32 {
+fn host_storage_get(mut caller: Caller<'_, HostState>, key_ptr: u32, key_len: u32, ret_ptr: u32, ret_len_ptr: u32) -> i32 {
     let mem = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
         _ => return -1,
     };
-
     let data = mem.data(&caller);
     let key_start = key_ptr as usize;
     let key_end = key_start + key_len as usize;
-
     if key_end > data.len() {
         return -1;
     }
-
     let key = String::from_utf8_lossy(&data[key_start..key_end]).to_string();
     let storage = caller.data().storage.lock().unwrap();
     let value = storage.get(&key).cloned().unwrap_or_default();
     let bytes = value.into_bytes();
-
     let ret_start = ret_ptr as usize;
     let ret_end = ret_start + bytes.len();
-
     if ret_end > data.len() {
         return -1;
     }
-
     unsafe {
         std::ptr::copy_nonoverlapping(
             bytes.as_ptr(),
@@ -128,7 +83,6 @@ fn host_storage_get(
             bytes.len(),
         );
     }
-
     let len_ptr = ret_len_ptr as usize;
     if len_ptr + 4 <= data.len() {
         let len_bytes = (bytes.len() as u32).to_le_bytes();
@@ -140,60 +94,29 @@ fn host_storage_get(
             );
         }
     }
-
     0
 }
 
-/// Write a value to the module's isolated storage.
-///
-/// # Arguments
-/// * `key_ptr` – pointer to key string
-/// * `key_len` – key length
-/// * `val_ptr` – pointer to value data
-/// * `val_len` – value length
-///
-/// # Returns
-/// 0 on success, -1 on error.
-fn host_storage_set(
-    mut caller: wasmtime::Caller<'_, HostState>,
-    key_ptr: u32,
-    key_len: u32,
-    val_ptr: u32,
-    val_len: u32,
-) -> i32 {
+fn host_storage_set(mut caller: Caller<'_, HostState>, key_ptr: u32, key_len: u32, val_ptr: u32, val_len: u32) -> i32 {
     let mem = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
         _ => return -1,
     };
-
     let data = mem.data(&caller);
     let key_start = key_ptr as usize;
     let key_end = key_start + key_len as usize;
     let val_start = val_ptr as usize;
     let val_end = val_start + val_len as usize;
-
     if key_end > data.len() || val_end > data.len() {
         return -1;
     }
-
     let key = String::from_utf8_lossy(&data[key_start..key_end]).to_string();
     let val = String::from_utf8_lossy(&data[val_start..val_end]).to_string();
-
     caller.data().storage.lock().unwrap().insert(key, val);
     0
 }
 
-// ====================== Helper Functions ======================
-
-/// Read a UTF-8 string from WASM memory, with bounds checking.
-///
-/// Returns `Ok(string)` on success, `Err(-1)` on failure.
-fn read_string_from_memory(
-    mem: &wasmtime::Memory,
-    store: &impl wasmtime::AsContext,
-    ptr: u32,
-    len: u32,
-) -> Result<String, i32> {
+pub fn read_string_from_memory(mem: &wasmtime::Memory, store: &impl AsContext, ptr: u32, len: u32) -> Result<String, i32> {
     let data = mem.data(store);
     let start = ptr as usize;
     let end = start + len as usize;
@@ -203,23 +126,40 @@ fn read_string_from_memory(
     Ok(String::from_utf8_lossy(&data[start..end]).to_string())
 }
 
-/// Perform an HTTP GET request (mock implementation for testing).
-///
-/// # Arguments
-/// * `url_ptr` – pointer to URL string
-/// * `url_len` – URL length
-/// * `_headers_ptr` – (unused) pointer to headers
-/// * `_headers_len` – (unused) headers length
-/// * `ret_ptr` – buffer for response body
-/// * `ret_len_ptr` – where to store actual response length
-///
-/// # Returns
-/// 0 on success, wasmtime::Error on failure.
-///
-/// # Security
-/// Only URLs whose prefixes are in `http_allowlist` are allowed.
+pub fn write_bytes_to_memory(
+    caller: &mut Caller<'_, HostState>,
+    ptr: u32,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(mem) => mem,
+        None => return Err("no memory".into()),
+    };
+    let data = mem.data_mut(caller);
+    let start = ptr as usize;
+    let end = start + bytes.len();
+    if end > data.len() {
+        return Err("buffer too small".into());
+    }
+    let len_bytes = (bytes.len() as u32).to_le_bytes();
+    if start + 4 > data.len() {
+        return Err("buffer too small for length".into());
+    }
+    data[start..start+4].copy_from_slice(&len_bytes);
+    data[start+4..end+4].copy_from_slice(bytes);
+    Ok(())
+}
+
+pub fn write_string_to_memory(
+    caller: &mut Caller<'_, HostState>,
+    ptr: u32,
+    s: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    write_bytes_to_memory(caller, ptr, s.as_bytes())
+}
+
 fn host_http_get(
-    mut caller: wasmtime::Caller<'_, HostState>,
+    mut caller: Caller<'_, HostState>,
     url_ptr: u32,
     url_len: u32,
     _headers_ptr: u32,
@@ -229,33 +169,24 @@ fn host_http_get(
 ) -> Result<i32, wasmtime::Error> {
     let mem = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
-        _ => {
-            eprintln!("host_http_get: cannot get memory");
-            return Err(wasmtime::Error::msg("no memory"));
-        }
+        _ => return Err(wasmtime::Error::msg("no memory")),
     };
-
     let url = match read_string_from_memory(&mem, &caller, url_ptr, url_len) {
         Ok(s) => s,
         Err(_) => return Err(wasmtime::Error::msg("invalid URL string")),
     };
-
     let host_state = caller.data();
     let allowed = host_state.http_allowlist.iter().any(|prefix| url.starts_with(prefix));
     if !allowed {
         eprintln!("HTTP URL not allowed: {}", url);
         return Err(wasmtime::Error::msg("URL not allowed"));
     }
-
-    // Mock response (simulates httpbin.org/get)
     let mock_body = format!(r#"{{"url":"{}","method":"GET","origin":"127.0.0.1"}}"#, url);
     let body = mock_body.into_bytes();
-
     if body.len() > host_state.max_body_size {
         eprintln!("Response body too large ({} > {})", body.len(), host_state.max_body_size);
         return Err(wasmtime::Error::msg("response too large"));
     }
-
     let data = mem.data_mut(&mut caller);
     let ret_start = ret_ptr as usize;
     let ret_end = ret_start + body.len();
@@ -263,35 +194,17 @@ fn host_http_get(
         eprintln!("Return buffer too small");
         return Err(wasmtime::Error::msg("buffer too small"));
     }
-
     data[ret_start..ret_end].copy_from_slice(&body);
-
     let len_ptr = ret_len_ptr as usize;
     if len_ptr + 4 <= data.len() {
         let len_bytes = (body.len() as u32).to_le_bytes();
         data[len_ptr..len_ptr+4].copy_from_slice(&len_bytes);
     }
-
     Ok(0)
 }
 
-/// Write a file inside the workspace.
-///
-/// # Arguments
-/// * `path_ptr` – pointer to relative path string
-/// * `path_len` – path length
-/// * `content_ptr` – pointer to data to write
-/// * `content_len` – data length
-///
-/// # Returns
-/// 0 on success, wasmtime::Error on failure.
-///
-/// # Security
-/// - Path must be relative and stay within `workspace_root`.
-/// - Parent directories are created automatically.
-/// - Maximum file size is 10 MB.
 fn host_workspace_write(
-    mut caller: wasmtime::Caller<'_, HostState>,
+    mut caller: Caller<'_, HostState>,
     path_ptr: u32,
     path_len: u32,
     content_ptr: u32,
@@ -299,35 +212,22 @@ fn host_workspace_write(
 ) -> Result<i32, wasmtime::Error> {
     let mem = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
-        _ => {
-            eprintln!("host_workspace_write: cannot get memory");
-            return Err(wasmtime::Error::msg("no memory"));
-        }
+        _ => return Err(wasmtime::Error::msg("no memory")),
     };
-
     let path_str = match read_string_from_memory(&mem, &caller, path_ptr, path_len) {
         Ok(s) => s,
         Err(_) => return Err(wasmtime::Error::msg("invalid path string")),
     };
-
     let host_state = caller.data();
     let workspace_root = match &host_state.workspace_root {
         Some(root) => root,
-        None => {
-            eprintln!("workspace_root not configured");
-            return Err(wasmtime::Error::msg("workspace not available"));
-        }
+        None => return Err(wasmtime::Error::msg("workspace not available")),
     };
-
-    // Prevent path traversal
     if path_str.starts_with('/') || path_str.starts_with("..") || path_str.contains("../") {
         eprintln!("Invalid path: {}", path_str);
         return Err(wasmtime::Error::msg("path not allowed"));
     }
-
     let full_path = workspace_root.join(&path_str);
-
-    // Ensure parent directory exists
     if let Some(parent) = full_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| {
@@ -336,8 +236,6 @@ fn host_workspace_write(
             })?;
         }
     }
-
-    // Canonicalize path to check it stays inside workspace
     if let Ok(canonicalized) = full_path.canonicalize() {
         if !canonicalized.starts_with(workspace_root) {
             eprintln!("Path escapes workspace: {}", canonicalized.display());
@@ -349,7 +247,6 @@ fn host_workspace_write(
             return Err(wasmtime::Error::msg("path outside workspace"));
         }
     }
-
     let data = mem.data(&caller);
     let content_start = content_ptr as usize;
     let content_end = content_start + content_len as usize;
@@ -357,13 +254,11 @@ fn host_workspace_write(
         return Err(wasmtime::Error::msg("content out of bounds"));
     }
     let content = data[content_start..content_end].to_vec();
-
     const MAX_SIZE: usize = 10 * 1024 * 1024;
     if content.len() > MAX_SIZE {
         eprintln!("Content too large: {} > {}", content.len(), MAX_SIZE);
         return Err(wasmtime::Error::msg("content too large"));
     }
-
     match fs::write(&full_path, content) {
         Ok(_) => Ok(0),
         Err(e) => {
@@ -373,21 +268,8 @@ fn host_workspace_write(
     }
 }
 
-/// List contents of a workspace directory.
-///
-/// # Arguments
-/// * `path_ptr` – pointer to relative path string
-/// * `path_len` – path length
-/// * `ret_ptr` – buffer for JSON array of filenames
-/// * `ret_len_ptr` – where to store actual JSON length
-///
-/// # Returns
-/// 0 on success, wasmtime::Error on failure.
-///
-/// # Security
-/// Path must be relative and stay within `workspace_root`.
 fn host_workspace_list(
-    mut caller: wasmtime::Caller<'_, HostState>,
+    mut caller: Caller<'_, HostState>,
     path_ptr: u32,
     path_len: u32,
     ret_ptr: u32,
@@ -395,41 +277,26 @@ fn host_workspace_list(
 ) -> Result<i32, wasmtime::Error> {
     let mem = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
-        _ => {
-            eprintln!("host_workspace_list: cannot get memory");
-            return Err(wasmtime::Error::msg("no memory"));
-        }
+        _ => return Err(wasmtime::Error::msg("no memory")),
     };
-
     let path_str = match read_string_from_memory(&mem, &caller, path_ptr, path_len) {
         Ok(s) => s,
         Err(_) => return Err(wasmtime::Error::msg("invalid path string")),
     };
-
     let host_state = caller.data();
     let workspace_root = match &host_state.workspace_root {
         Some(root) => root,
-        None => {
-            eprintln!("workspace_root not configured");
-            return Err(wasmtime::Error::msg("workspace not available"));
-        }
+        None => return Err(wasmtime::Error::msg("workspace not available")),
     };
-
     if path_str.starts_with('/') || path_str.starts_with("..") || path_str.contains("../") {
         eprintln!("Invalid path: {}", path_str);
         return Err(wasmtime::Error::msg("path not allowed"));
     }
-
     let full_path = workspace_root.join(&path_str);
-
     let entries = match fs::read_dir(&full_path) {
         Ok(rd) => rd,
-        Err(e) => {
-            eprintln!("Failed to read directory: {}", e);
-            return Err(wasmtime::Error::msg("read_dir failed"));
-        }
+        Err(e) => return Err(wasmtime::Error::msg("read_dir failed")),
     };
-
     let mut file_names = Vec::new();
     for entry in entries {
         match entry {
@@ -444,18 +311,15 @@ fn host_workspace_list(
             }
         }
     }
-
     let json_str = serde_json::to_string(&file_names).map_err(|e| {
         eprintln!("JSON serialization failed: {}", e);
         wasmtime::Error::msg("serialization error")
     })?;
     let body = json_str.into_bytes();
-
     if body.len() > host_state.max_body_size {
         eprintln!("Response body too large ({} > {})", body.len(), host_state.max_body_size);
         return Err(wasmtime::Error::msg("response too large"));
     }
-
     let data = mem.data_mut(&mut caller);
     let ret_start = ret_ptr as usize;
     let ret_end = ret_start + body.len();
@@ -463,33 +327,17 @@ fn host_workspace_list(
         eprintln!("Return buffer too small");
         return Err(wasmtime::Error::msg("buffer too small"));
     }
-
     data[ret_start..ret_end].copy_from_slice(&body);
-
     let len_ptr = ret_len_ptr as usize;
     if len_ptr + 4 <= data.len() {
         let len_bytes = (body.len() as u32).to_le_bytes();
         data[len_ptr..len_ptr+4].copy_from_slice(&len_bytes);
     }
-
     Ok(0)
 }
 
-/// Get an environment variable (subject to allowlist).
-///
-/// # Arguments
-/// * `key_ptr` – pointer to variable name
-/// * `key_len` – name length
-/// * `ret_ptr` – buffer for value
-/// * `ret_len_ptr` – where to store actual value length
-///
-/// # Returns
-/// 0 on success, wasmtime::Error on failure.
-///
-/// # Security
-/// Only keys listed in `env_allowlist` are accessible.
 fn host_env_get(
-    mut caller: wasmtime::Caller<'_, HostState>,
+    mut caller: Caller<'_, HostState>,
     key_ptr: u32,
     key_len: u32,
     ret_ptr: u32,
@@ -497,35 +345,26 @@ fn host_env_get(
 ) -> Result<i32, wasmtime::Error> {
     let mem = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
-        _ => {
-            eprintln!("host_env_get: cannot get memory");
-            return Err(wasmtime::Error::msg("no memory"));
-        }
+        _ => return Err(wasmtime::Error::msg("no memory")),
     };
-
     let key = match read_string_from_memory(&mem, &caller, key_ptr, key_len) {
         Ok(s) => s,
         Err(_) => return Err(wasmtime::Error::msg("invalid key string")),
     };
-
     let host_state = caller.data();
     if !host_state.env_allowlist.contains(&key) {
         eprintln!("Environment variable not allowed: {}", key);
         return Err(wasmtime::Error::msg("env var not allowed"));
     }
-
     let value = match env::var(&key) {
         Ok(val) => val,
         Err(_) => String::new(),
     };
-
     let bytes = value.into_bytes();
-
     if bytes.len() > host_state.max_body_size {
         eprintln!("Environment value too large ({} > {})", bytes.len(), host_state.max_body_size);
         return Err(wasmtime::Error::msg("value too large"));
     }
-
     let data = mem.data_mut(&mut caller);
     let ret_start = ret_ptr as usize;
     let ret_end = ret_start + bytes.len();
@@ -533,47 +372,29 @@ fn host_env_get(
         eprintln!("Return buffer too small");
         return Err(wasmtime::Error::msg("buffer too small"));
     }
-
     data[ret_start..ret_end].copy_from_slice(&bytes);
-
     let len_ptr = ret_len_ptr as usize;
     if len_ptr + 4 <= data.len() {
         let len_bytes = (bytes.len() as u32).to_le_bytes();
         data[len_ptr..len_ptr+4].copy_from_slice(&len_bytes);
     }
-
     Ok(0)
 }
 
-/// Generate cryptographically secure random bytes.
-///
-/// # Arguments
-/// * `len` – number of random bytes to generate
-/// * `ret_ptr` – buffer where bytes will be placed
-/// * `ret_len_ptr` – where to store actual length (same as len on success)
-///
-/// # Returns
-/// 0 on success, wasmtime::Error on failure.
 fn host_random_bytes(
-    mut caller: wasmtime::Caller<'_, HostState>,
+    mut caller: Caller<'_, HostState>,
     len: u32,
     ret_ptr: u32,
     ret_len_ptr: u32,
 ) -> Result<i32, wasmtime::Error> {
     use rand::RngCore;
-
     let mem = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
-        _ => {
-            eprintln!("host_random_bytes: cannot get memory");
-            return Err(wasmtime::Error::msg("no memory"));
-        }
+        _ => return Err(wasmtime::Error::msg("no memory")),
     };
-
     let len_usize = len as usize;
     let mut bytes = vec![0u8; len_usize];
     rand::thread_rng().fill_bytes(&mut bytes);
-
     let data = mem.data_mut(&mut caller);
     let ret_start = ret_ptr as usize;
     let ret_end = ret_start + len_usize;
@@ -581,40 +402,25 @@ fn host_random_bytes(
         eprintln!("Return buffer too small");
         return Err(wasmtime::Error::msg("buffer too small"));
     }
-
     data[ret_start..ret_end].copy_from_slice(&bytes);
-
     let len_ptr = ret_len_ptr as usize;
     if len_ptr + 4 <= data.len() {
         let len_bytes = (len as u32).to_le_bytes();
         data[len_ptr..len_ptr+4].copy_from_slice(&len_bytes);
     }
-
     Ok(0)
 }
 
-/// Sleep (block) for the specified number of milliseconds.
-///
-/// # Arguments
-/// * `ms` – sleep duration in milliseconds (max 10000)
-///
-/// # Returns
-/// 0 on success, wasmtime::Error if duration exceeds limit.
-fn host_sleep_ms(
-    _caller: wasmtime::Caller<'_, HostState>,
-    ms: u32,
-) -> Result<i32, wasmtime::Error> {
+fn host_sleep_ms(_caller: Caller<'_, HostState>, ms: u32) -> Result<i32, wasmtime::Error> {
     const MAX_SLEEP_MS: u32 = 10000;
     if ms > MAX_SLEEP_MS {
         eprintln!("Sleep duration too long: {} > {}", ms, MAX_SLEEP_MS);
         return Err(wasmtime::Error::msg("sleep too long"));
     }
-
     thread::sleep(Duration::from_millis(ms as u64));
     Ok(0)
 }
 
-// ====================== WasmExtension ======================
 pub struct WasmExtension {
     name: String,
     version: String,
@@ -623,12 +429,7 @@ pub struct WasmExtension {
 }
 
 impl WasmExtension {
-    pub fn new(
-        name: String,
-        version: String,
-        instance: Instance,
-        store: Store<HostState>,
-    ) -> Self {
+    pub fn new(name: String, version: String, instance: Instance, store: Store<HostState>) -> Self {
         Self {
             name,
             version,
@@ -647,7 +448,7 @@ impl Extension for WasmExtension {
         &self.version
     }
 
-    fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
+    fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut guard = self.store.lock().unwrap();
         if let Some(func) = self.instance.get_func(&mut *guard, "_init") {
             let mut results = vec![];
@@ -656,7 +457,11 @@ impl Extension for WasmExtension {
         Ok(())
     }
 
-    fn call(&self, method: &str, _payload: Value) -> Result<Value, Box<dyn std::error::Error>> {
+    fn call(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut guard = self.store.lock().unwrap();
 
         let start = std::time::Instant::now();
@@ -669,12 +474,33 @@ impl Extension for WasmExtension {
             .get_func(&mut *guard, method)
             .ok_or_else(|| format!("method {} not found", method))?;
 
+        let param_str = serde_json::to_string(&payload)?;
+        let param_bytes = param_str.as_bytes();
+        let param_len = param_bytes.len();
+
+        const PARAM_PTR: u32 = 0x10000;
+
+        let memory = self.instance
+            .get_memory(&mut *guard, "memory")
+            .ok_or_else(|| anyhow::anyhow!("no memory"))?;
+
+        {
+            let data = memory.data_mut(&mut *guard);
+            let start = PARAM_PTR as usize;
+            if start + 4 + param_len > data.len() {
+                return Err(anyhow::anyhow!("parameter memory too small").into());
+            }
+            let len_bytes = (param_len as u32).to_le_bytes();
+            data[start..start+4].copy_from_slice(&len_bytes);
+            data[start+4..start+4+param_len].copy_from_slice(param_bytes);
+        }
+
+        let param_vals = vec![wasmtime::Val::I32(PARAM_PTR as i32)];
         let mut results = vec![wasmtime::Val::I32(0)];
-        let result = func.call(&mut *guard, &[], &mut results);
+        let result = func.call(&mut *guard, &param_vals, &mut results);
 
         let duration = start.elapsed();
         let fuel_used = initial_fuel.saturating_sub(guard.get_fuel().unwrap_or(0));
-        let _memory_mb = guard.data().memory_limit as f64 / (1024.0 * 1024.0);
 
         match result {
             Ok(_) => {
@@ -684,8 +510,21 @@ impl Extension for WasmExtension {
                     &self.name,
                     &self.version
                 );
-                if let Some(wasmtime::Val::I32(val)) = results.first() {
-                    Ok(Value::Number((*val).into()))
+
+                if let Some(wasmtime::Val::I32(ret_ptr)) = results.first() {
+                    let ret_ptr = *ret_ptr as u32;
+                    let data = memory.data(&*guard);
+                    let start = ret_ptr as usize;
+                    if start + 4 > data.len() {
+                        return Err(anyhow::anyhow!("result pointer out of bounds").into());
+                    }
+                    let len = u32::from_le_bytes(data[start..start+4].try_into().unwrap()) as usize;
+                    if start + 4 + len > data.len() {
+                        return Err(anyhow::anyhow!("result string out of bounds").into());
+                    }
+                    let result_str = String::from_utf8_lossy(&data[start+4..start+4+len]).to_string();
+                    let result_value: Value = serde_json::from_str(&result_str)?;
+                    Ok(result_value)
                 } else {
                     Ok(Value::Null)
                 }
@@ -698,7 +537,6 @@ impl Extension for WasmExtension {
     }
 }
 
-// ====================== Loader ======================
 pub fn load_wasm_plugin(
     path: &str,
     name: String,
@@ -710,7 +548,7 @@ pub fn load_wasm_plugin(
     env_allowlist: Vec<String>,
     workspace_root: Option<PathBuf>,
     max_body_size: usize,
-) -> Result<Box<dyn Extension>, Box<dyn std::error::Error>> {
+) -> Result<Box<dyn Extension>, Box<dyn std::error::Error + Send + Sync>> {
     let mut config = Config::new();
     config.consume_fuel(true);
     let engine = Engine::new(&config)?;
@@ -727,6 +565,9 @@ pub fn load_wasm_plugin(
     linker.func_wrap("host", "env_get", host_env_get)?;
     linker.func_wrap("host", "random_bytes", host_random_bytes)?;
     linker.func_wrap("host", "sleep_ms", host_sleep_ms)?;
+
+    // === 注册所有模块化函数 ===
+    crate::extension::functions::register_all(&mut linker)?;
 
     let host_state = HostState {
         memory_limit: mem_limit,

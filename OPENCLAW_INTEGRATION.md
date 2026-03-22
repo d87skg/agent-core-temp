@@ -36,6 +36,7 @@ async function runOnAgentCore(taskType: string, payload: any): Promise<string> {
   const response = await fetch('http://localhost:3000/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    
     body: JSON.stringify({ intent: { type: taskType, payload } })
   });
   const data = await response.json();

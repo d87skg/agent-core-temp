@@ -1,31 +1,32 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-
+use std::sync::Arc;
 use anyhow::Result;
 use petgraph::graph::DiGraph;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
+use crate::extension::Extension;
+
 // ================= 意图定义 =================
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Intent {
-    Transfer {
-        to: String,
-        amount: u64,
-        asset: String,
-    },
-    Swap {
-        from: String,
-        to: String,
-        amount: u64,
-    },
-    Stake {
-        pool: String,
-        amount: u64,
-        lock_period: Option<u64>,
-    },
+    Transfer { to: String, amount: u64, asset: String },
+    Swap { from: String, to: String, amount: u64 },
+    Stake { pool: String, amount: u64, lock_period: Option<u64> },
+
+    EchoText { text: String },
+    HttpPost { url: String, body: Option<String> },
+    WorkspaceRead { path: String },
+    WorkspaceDelete { path: String, confirm: String },
+    PermissionCheck { resource: String, action: String },
+    CostTracker { tokens: u64, cost_cents: u64 },
+    WebSearch { query: String },
+
+    BrowserOpen { url: String },
+    BrowserScreenshot,
 }
 
 // ================= 任务定义 =================
@@ -51,7 +52,6 @@ pub trait WorkflowCompiler: Send + Sync {
     fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>>;
 }
 
-// ---------------- 简单编译器 ----------------
 pub struct SimpleCompiler;
 
 impl WorkflowCompiler for SimpleCompiler {
@@ -68,8 +68,7 @@ impl WorkflowCompiler for SimpleCompiler {
                     Task {
                         id: "2".into(),
                         name: "execute_transfer".into(),
-                        input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset)
-                            .into_bytes(),
+                        input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset).into_bytes(),
                         dependencies: vec!["1".into()],
                     },
                 ],
@@ -77,46 +76,104 @@ impl WorkflowCompiler for SimpleCompiler {
                     Task {
                         id: "1".into(),
                         name: "check_balance".into(),
-                        input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount)
-                            .into_bytes(),
+                        input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount).into_bytes(),
                         dependencies: vec![],
                     },
                     Task {
                         id: "2".into(),
                         name: "execute_swap".into(),
-                        input: format!(
-                            r#"{{"from":"{}","to":"{}","amount":{}}}"#,
-                            from, to, amount
-                        )
-                        .into_bytes(),
+                        input: format!(r#"{{"from":"{}","to":"{}","amount":{}}}"#, from, to, amount).into_bytes(),
                         dependencies: vec!["1".into()],
                     },
                 ],
-                Intent::Stake {
-                    pool,
-                    amount,
-                    lock_period,
-                } => {
+                Intent::Stake { pool, amount, lock_period } => {
                     let lock = lock_period.unwrap_or(0);
                     vec![
                         Task {
                             id: "1".into(),
                             name: "approve_stake".into(),
-                            input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount)
-                                .into_bytes(),
+                            input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount).into_bytes(),
                             dependencies: vec![],
                         },
                         Task {
                             id: "2".into(),
                             name: "stake_tokens".into(),
-                            input: format!(
-                                r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#,
-                                pool, amount, lock
-                            )
-                            .into_bytes(),
+                            input: format!(r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#, pool, amount, lock).into_bytes(),
                             dependencies: vec!["1".into()],
                         },
                     ]
+                }
+                Intent::EchoText { text } => {
+                    vec![Task {
+                        id: "echo_1".into(),
+                        name: "echo_text".into(),
+                        input: serde_json::to_vec(&serde_json::json!({ "text": text }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::HttpPost { url, body } => {
+                    vec![Task {
+                        id: "http_1".into(),
+                        name: "http_post".into(),
+                        input: serde_json::to_vec(&serde_json::json!({ "url": url, "body": body }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::WorkspaceRead { path } => {
+                    vec![Task {
+                        id: "read_1".into(),
+                        name: "workspace_read".into(),
+                        input: serde_json::to_vec(&serde_json::json!({ "path": path }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::WorkspaceDelete { path, confirm } => {
+                    vec![Task {
+                        id: "del_1".into(),
+                        name: "workspace_delete".into(),
+                        input: serde_json::to_vec(&serde_json::json!({ "path": path, "confirm": confirm }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::PermissionCheck { resource, action } => {
+                    vec![Task {
+                        id: "perm_1".into(),
+                        name: "permission_check".into(),
+                        input: serde_json::to_vec(&serde_json::json!({ "resource": resource, "action": action }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::CostTracker { tokens, cost_cents } => {
+                    vec![Task {
+                        id: "cost_1".into(),
+                        name: "cost_tracker".into(),
+                        input: serde_json::to_vec(&serde_json::json!({ "tokens": tokens, "cost_cents": cost_cents }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::WebSearch { query } => {
+                    vec![Task {
+                        id: "search_1".into(),
+                        name: "web_search".into(),
+                        input: serde_json::to_vec(&serde_json::json!({ "query": query }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::BrowserOpen { url } => {
+                    vec![Task {
+                        id: "browser_open_1".into(),
+                        name: "browser_open".into(),
+                        input: serde_json::to_vec(&serde_json::json!({ "url": url }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::BrowserScreenshot => {
+                    vec![Task {
+                        id: "browser_screenshot_1".into(),
+                        name: "browser_screenshot".into(),
+                        input: serde_json::to_vec(&serde_json::json!({}))?,
+                        dependencies: vec![],
+                    }]
                 }
             };
             Ok(tasks)
@@ -126,29 +183,23 @@ impl WorkflowCompiler for SimpleCompiler {
 
 // ================= 工作流执行器 =================
 pub trait WorkflowExecutor: Send + Sync {
-    fn execute(
-        &self,
-        tasks: Vec<Task>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
+    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
     fn status(&self, task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
 }
 
-// ---------------- 并行执行器 ----------------
-pub struct ParallelExecutor;
+pub struct ParallelExecutor {
+    plugin: Arc<dyn Extension>,
+}
 
 impl ParallelExecutor {
-    async fn execute_task(task: Task) -> Result<()> {
-        println!("Executing task: {} - {}", task.id, task.name);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        Ok(())
+    pub fn new(plugin: Arc<dyn Extension>) -> Self {
+        Self { plugin }
     }
 }
 
 impl WorkflowExecutor for ParallelExecutor {
-    fn execute(
-        &self,
-        tasks: Vec<Task>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>> {
+    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>> {
+        let plugin = self.plugin.clone();
         Box::pin(async move {
             let mut id_to_idx = HashMap::new();
             for (i, t) in tasks.iter().enumerate() {
@@ -191,8 +242,14 @@ impl WorkflowExecutor for ParallelExecutor {
                 for _ in 0..layer_size {
                     let idx = queue.pop_front().unwrap();
                     let task = tasks[idx].clone();
+                    let plugin_clone = plugin.clone();
                     joinset.spawn(async move {
-                        ParallelExecutor::execute_task(task).await?;
+                        eprintln!("Executing task: {} - {}", task.id, task.name);
+                        let params: serde_json::Value = serde_json::from_slice(&task.input)?;
+                        // 同步调用插件（注意：这里没有 .await，因为 call 是同步的）
+                        let result = plugin_clone.call(&task.name, params)
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                        eprintln!("Task result: {}", result);
                         Ok::<usize, anyhow::Error>(idx)
                     });
                 }
@@ -201,9 +258,7 @@ impl WorkflowExecutor for ParallelExecutor {
                     match res {
                         Ok(Ok(idx)) => {
                             results.push(tasks[idx].id.clone());
-                            for neighbor in
-                                graph.neighbors_directed(nodes[idx], Direction::Outgoing)
-                            {
+                            for neighbor in graph.neighbors_directed(nodes[idx], Direction::Outgoing) {
                                 let n_idx = *graph.node_weight(neighbor).unwrap();
                                 in_degree[n_idx] -= 1;
                                 if in_degree[n_idx] == 0 {

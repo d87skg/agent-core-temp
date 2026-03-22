@@ -1,4 +1,4 @@
-use agent_core_temp::observability;
+﻿use agent_core_temp::observability;
 use agent_core_temp::ingress;
 use agent_core_temp::scheduler::memory::MemoryScheduler;
 use agent_core_temp::scheduler::Scheduler;
@@ -8,11 +8,41 @@ use agent_core_temp::idempotency::IdempotencyBackend;
 use agent_core_temp::idempotency::memory::MemoryBackend;
 #[cfg(feature = "sled-storage")]
 use agent_core_temp::idempotency::sled::SledBackend;
-use anyhow::Result;
+use agent_core_temp::workflow::ParallelExecutor;
+use agent_core_temp::extension::Extension;
+use anyhow::{anyhow, Result};
 use std::env;
 use std::sync::Arc;
 use tracing_subscriber;
 use rand::Rng;
+use serde_json::Value;
+
+// 模拟插件
+struct MockExtension;
+
+impl Extension for MockExtension {
+    fn name(&self) -> &str {
+        "mock-plugin"
+    }
+
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    fn call(
+        &self,
+        method: &str,
+        payload: Value,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        println!("MockExtension called: method={}, payload={}", method, payload);
+        // 模拟返回成功
+        Ok(serde_json::json!({ "result": "success", "method": method }))
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -60,9 +90,13 @@ async fn main() -> Result<()> {
             anyhow::bail!("Unknown idempotency storage type: {}", storage_type);
         }
     };
-    // 注意：幂等性存储目前未传入 ingress，仅用于演示。后续可扩展 ingress 使用它。
 
-    // 3. 启动 worker 循环（消费任务）
+    // 3. 使用模拟插件
+    let plugin: Box<dyn Extension> = Box::new(MockExtension);
+    let shared_plugin: Arc<dyn Extension> = Arc::from(plugin);
+    let executor = Arc::new(ParallelExecutor::new(shared_plugin.clone()));
+
+    // 4. 启动 worker 循环（消费任务）
     let worker_scheduler = scheduler.clone();
     tokio::spawn(async move {
         loop {
@@ -77,9 +111,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // 环境变量控制模拟延迟：设置 DISABLE_SIMULATED_DELAY=1 时跳过 sleep，用于压测
             if std::env::var("DISABLE_SIMULATED_DELAY").is_ok() {
-                // 压测模式：不 sleep，仅让出 CPU 避免完全占满
                 tokio::task::yield_now().await;
             } else {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -87,7 +119,8 @@ async fn main() -> Result<()> {
         }
     });
 
+    // 5. 启动 HTTP 服务器，传入 scheduler 和 executor
     println!("🚀 Starting agent-core ingress server...");
-    ingress::start_server(scheduler).await?;
+    ingress::start_server(scheduler, executor).await?;
     Ok(())
 }
