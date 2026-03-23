@@ -131,9 +131,7 @@ pub fn register_fs(linker: &mut Linker<HostState>) -> Result<()> {
         }
     })?;
 
-    // ===================== 新增函数 =====================
-    
-    // workspace_mkdir: 创建工作区目录（含父目录）
+    // workspace_mkdir: 创建工作区目录（递归创建父目录）
     linker.func_wrap("env", "workspace_mkdir", |mut caller: Caller<'_, HostState>,
                      path_ptr: u32, path_len: u32,
                      result_ptr: u32| -> Result<i32, wasmtime::Error> {

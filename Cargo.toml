@@ -55,13 +55,15 @@ rand = "0.8"
 url = "2.5"
 urlencoding = "2.1"
 chromiumoxide = { version = "0.5", features = ["tokio-runtime"] }
+hmac = "0.12"
+serde_urlencoded = "0.7"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
-
-
-# 新增 HTTP 客户端
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
+# 新增/调整的依赖
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "blocking"] }
 backon = "1.5.0"
 lazy_static = "1.4"
+data-encoding = "2.5"
 
 # 可选依赖
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }

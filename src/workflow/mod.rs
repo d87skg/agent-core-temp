@@ -7,6 +7,7 @@ use petgraph::graph::DiGraph;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
+use uuid::Uuid;
 
 use crate::extension::Extension;
 
@@ -21,15 +22,31 @@ pub enum Intent {
     HttpPost { url: String, body: Option<String> },
     WorkspaceRead { path: String },
     WorkspaceDelete { path: String, confirm: String },
+    WorkspaceMkdir { path: String, recursive: bool },
     PermissionCheck { resource: String, action: String },
     CostTracker { tokens: u64, cost_cents: u64 },
     WebSearch { query: String },
 
     BrowserOpen { url: String },
     BrowserScreenshot,
+
+    HttpRequest {
+        method: String,
+        url: String,
+        headers: Option<HashMap<String, String>>,
+        body: Option<String>,
+        proxy: Option<String>,
+    },
+
+    CryptoHash { input: String },
+
+    // 新增意图
+    WorkspaceRename { old_path: String, new_path: String },
+    CryptoSign { private_key_hex: String, message: String },
+    CryptoVerify { public_key_hex: String, message: String, signature_hex: String },
+    DatabaseQuery { connection_string: String, sql: String, params: Vec<serde_json::Value> },
 }
 
-// ================= 任务定义 =================
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -38,7 +55,6 @@ pub struct Task {
     pub dependencies: Vec<String>,
 }
 
-// ================= 任务状态 =================
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskStatus {
     Pending,
@@ -47,7 +63,6 @@ pub enum TaskStatus {
     Failed(String),
 }
 
-// ================= 工作流编译器 =================
 pub trait WorkflowCompiler: Send + Sync {
     fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>>;
 }
@@ -59,119 +74,113 @@ impl WorkflowCompiler for SimpleCompiler {
         Box::pin(async move {
             let tasks = match intent {
                 Intent::Transfer { to, amount, asset } => vec![
-                    Task {
-                        id: "1".into(),
-                        name: "validate_account".into(),
-                        input: format!(r#"{{"to":"{}"}}"#, to).into_bytes(),
-                        dependencies: vec![],
-                    },
-                    Task {
-                        id: "2".into(),
-                        name: "execute_transfer".into(),
-                        input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset).into_bytes(),
-                        dependencies: vec!["1".into()],
-                    },
+                    Task { id: "1".into(), name: "validate_account".into(), input: format!(r#"{{"to":"{}"}}"#, to).into_bytes(), dependencies: vec![] },
+                    Task { id: "2".into(), name: "execute_transfer".into(), input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset).into_bytes(), dependencies: vec!["1".into()] },
                 ],
                 Intent::Swap { from, to, amount } => vec![
-                    Task {
-                        id: "1".into(),
-                        name: "check_balance".into(),
-                        input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount).into_bytes(),
-                        dependencies: vec![],
-                    },
-                    Task {
-                        id: "2".into(),
-                        name: "execute_swap".into(),
-                        input: format!(r#"{{"from":"{}","to":"{}","amount":{}}}"#, from, to, amount).into_bytes(),
-                        dependencies: vec!["1".into()],
-                    },
+                    Task { id: "1".into(), name: "check_balance".into(), input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount).into_bytes(), dependencies: vec![] },
+                    Task { id: "2".into(), name: "execute_swap".into(), input: format!(r#"{{"from":"{}","to":"{}","amount":{}}}"#, from, to, amount).into_bytes(), dependencies: vec!["1".into()] },
                 ],
                 Intent::Stake { pool, amount, lock_period } => {
                     let lock = lock_period.unwrap_or(0);
                     vec![
-                        Task {
-                            id: "1".into(),
-                            name: "approve_stake".into(),
-                            input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount).into_bytes(),
-                            dependencies: vec![],
-                        },
-                        Task {
-                            id: "2".into(),
-                            name: "stake_tokens".into(),
-                            input: format!(r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#, pool, amount, lock).into_bytes(),
-                            dependencies: vec!["1".into()],
-                        },
+                        Task { id: "1".into(), name: "approve_stake".into(), input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount).into_bytes(), dependencies: vec![] },
+                        Task { id: "2".into(), name: "stake_tokens".into(), input: format!(r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#, pool, amount, lock).into_bytes(), dependencies: vec!["1".into()] },
                     ]
                 }
                 Intent::EchoText { text } => {
-                    vec![Task {
-                        id: "echo_1".into(),
-                        name: "echo_text".into(),
-                        input: serde_json::to_vec(&serde_json::json!({ "text": text }))?,
-                        dependencies: vec![],
-                    }]
+                    vec![Task { id: "echo_1".into(), name: "echo_text".into(), input: serde_json::to_vec(&serde_json::json!({ "text": text }))?, dependencies: vec![] }]
                 }
                 Intent::HttpPost { url, body } => {
-                    vec![Task {
-                        id: "http_1".into(),
-                        name: "http_post".into(),
-                        input: serde_json::to_vec(&serde_json::json!({ "url": url, "body": body }))?,
-                        dependencies: vec![],
-                    }]
+                    vec![Task { id: "http_1".into(), name: "http_post".into(), input: serde_json::to_vec(&serde_json::json!({ "url": url, "body": body }))?, dependencies: vec![] }]
                 }
                 Intent::WorkspaceRead { path } => {
-                    vec![Task {
-                        id: "read_1".into(),
-                        name: "workspace_read".into(),
-                        input: serde_json::to_vec(&serde_json::json!({ "path": path }))?,
-                        dependencies: vec![],
-                    }]
+                    vec![Task { id: "read_1".into(), name: "workspace_read".into(), input: serde_json::to_vec(&serde_json::json!({ "path": path }))?, dependencies: vec![] }]
                 }
                 Intent::WorkspaceDelete { path, confirm } => {
                     vec![Task {
-                        id: "del_1".into(),
-                        name: "workspace_delete".into(),
+                        id: Uuid::new_v4().to_string(),
+                        name: "workspace_delete".to_string(),
                         input: serde_json::to_vec(&serde_json::json!({ "path": path, "confirm": confirm }))?,
                         dependencies: vec![],
                     }]
                 }
-                Intent::PermissionCheck { resource, action } => {
+                Intent::WorkspaceMkdir { path, recursive } => {
                     vec![Task {
-                        id: "perm_1".into(),
-                        name: "permission_check".into(),
-                        input: serde_json::to_vec(&serde_json::json!({ "resource": resource, "action": action }))?,
+                        id: Uuid::new_v4().to_string(),
+                        name: "workspace_mkdir".to_string(),
+                        input: serde_json::to_vec(&serde_json::json!({ "path": path, "recursive": recursive }))?,
                         dependencies: vec![],
                     }]
+                }
+                Intent::PermissionCheck { resource, action } => {
+                    vec![Task { id: "perm_1".into(), name: "permission_check".into(), input: serde_json::to_vec(&serde_json::json!({ "resource": resource, "action": action }))?, dependencies: vec![] }]
                 }
                 Intent::CostTracker { tokens, cost_cents } => {
-                    vec![Task {
-                        id: "cost_1".into(),
-                        name: "cost_tracker".into(),
-                        input: serde_json::to_vec(&serde_json::json!({ "tokens": tokens, "cost_cents": cost_cents }))?,
-                        dependencies: vec![],
-                    }]
+                    vec![Task { id: "cost_1".into(), name: "cost_tracker".into(), input: serde_json::to_vec(&serde_json::json!({ "tokens": tokens, "cost_cents": cost_cents }))?, dependencies: vec![] }]
                 }
                 Intent::WebSearch { query } => {
-                    vec![Task {
-                        id: "search_1".into(),
-                        name: "web_search".into(),
-                        input: serde_json::to_vec(&serde_json::json!({ "query": query }))?,
-                        dependencies: vec![],
-                    }]
+                    vec![Task { id: "search_1".into(), name: "web_search".into(), input: serde_json::to_vec(&serde_json::json!({ "query": query }))?, dependencies: vec![] }]
                 }
                 Intent::BrowserOpen { url } => {
+                    vec![Task { id: "browser_open_1".into(), name: "browser_open".into(), input: serde_json::to_vec(&serde_json::json!({ "url": url }))?, dependencies: vec![] }]
+                }
+                Intent::BrowserScreenshot => {
+                    vec![Task { id: "browser_screenshot_1".into(), name: "browser_screenshot".into(), input: serde_json::to_vec(&serde_json::json!({}))?, dependencies: vec![] }]
+                }
+                Intent::HttpRequest { method, url, headers, body, proxy } => {
+                    let input = serde_json::to_vec(&serde_json::json!({
+                        "method": method,
+                        "url": url,
+                        "headers": headers,
+                        "body": body,
+                        "proxy": proxy,
+                    }))?;
                     vec![Task {
-                        id: "browser_open_1".into(),
-                        name: "browser_open".into(),
-                        input: serde_json::to_vec(&serde_json::json!({ "url": url }))?,
+                        id: Uuid::new_v4().to_string(),
+                        name: "http_request".to_string(),
+                        input,
                         dependencies: vec![],
                     }]
                 }
-                Intent::BrowserScreenshot => {
+                Intent::CryptoHash { input } => {
                     vec![Task {
-                        id: "browser_screenshot_1".into(),
-                        name: "browser_screenshot".into(),
-                        input: serde_json::to_vec(&serde_json::json!({}))?,
+                        id: Uuid::new_v4().to_string(),
+                        name: "crypto_hash".to_string(),
+                        input: serde_json::to_vec(&serde_json::json!({ "input": input }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                // 新增分支
+                Intent::WorkspaceRename { old_path, new_path } => {
+                    vec![Task {
+                        id: Uuid::new_v4().to_string(),
+                        name: "workspace_rename".to_string(),
+                        input: serde_json::to_vec(&serde_json::json!({ "old_path": old_path, "new_path": new_path }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::CryptoSign { private_key_hex, message } => {
+                    vec![Task {
+                        id: Uuid::new_v4().to_string(),
+                        name: "crypto_sign_ed25519".to_string(),
+                        input: serde_json::to_vec(&serde_json::json!({ "private_key_hex": private_key_hex, "message": message }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::CryptoVerify { public_key_hex, message, signature_hex } => {
+                    vec![Task {
+                        id: Uuid::new_v4().to_string(),
+                        name: "crypto_verify_ed25519".to_string(),
+                        input: serde_json::to_vec(&serde_json::json!({ "public_key_hex": public_key_hex, "message": message, "signature_hex": signature_hex }))?,
+                        dependencies: vec![],
+                    }]
+                }
+                Intent::DatabaseQuery { connection_string, sql, params } => {
+                    vec![Task {
+                        id: Uuid::new_v4().to_string(),
+                        name: "database_query".to_string(),
+                        input: serde_json::to_vec(&serde_json::json!({ "connection_string": connection_string, "sql": sql, "params": params }))?,
                         dependencies: vec![],
                     }]
                 }
@@ -181,7 +190,6 @@ impl WorkflowCompiler for SimpleCompiler {
     }
 }
 
-// ================= 工作流执行器 =================
 pub trait WorkflowExecutor: Send + Sync {
     fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
     fn status(&self, task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
@@ -246,7 +254,6 @@ impl WorkflowExecutor for ParallelExecutor {
                     joinset.spawn(async move {
                         eprintln!("Executing task: {} - {}", task.id, task.name);
                         let params: serde_json::Value = serde_json::from_slice(&task.input)?;
-                        // 同步调用插件（注意：这里没有 .await，因为 call 是同步的）
                         let result = plugin_clone.call(&task.name, params)
                             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                         eprintln!("Task result: {}", result);

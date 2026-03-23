@@ -1,7 +1,7 @@
 //! Extension module for loading and managing plugins
 
 pub mod wasm;
-pub mod functions;   // 新增：声明 functions 子模块
+pub mod functions;
 
 use serde_json::Value;
 

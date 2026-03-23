@@ -7,6 +7,8 @@ pub mod fs;
 pub mod security;
 pub mod cost;
 pub mod browser;
+pub mod crypto;
+pub mod database;
 
 use wasmtime::Linker;
 use crate::extension::wasm::HostState;
@@ -19,5 +21,7 @@ pub fn register_all(linker: &mut Linker<HostState>) -> Result<()> {
     security::register_security(linker)?;
     cost::register_cost(linker)?;
     browser::register_browser(linker)?;
+    crypto::register_crypto(linker)?;
+    database::register_database(linker)?;
     Ok(())
 }

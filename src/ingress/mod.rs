@@ -37,7 +37,27 @@ pub struct IntentPayload {
     pub action: Option<String>,
     pub tokens: Option<u64>,
     pub cost_cents: Option<u64>,
-    pub query: Option<String>,  // 用于 web_search
+    pub query: Option<String>,
+    // 新增：http_request 相关字段
+    pub method: Option<String>,
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    pub proxy: Option<String>,
+    // 新增：workspace_mkdir 相关字段
+    pub recursive: Option<bool>,
+    // 新增：crypto_hash 相关字段
+    pub input: Option<String>,
+    // 新增：workspace_rename 相关字段
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
+    // 新增：crypto_sign/verify 相关字段
+    pub private_key_hex: Option<String>,
+    pub signature_hex: Option<String>,
+    pub message: Option<String>,         // 用于 crypto_sign/verify
+    pub public_key_hex: Option<String>,  // 用于 crypto_verify
+    // 新增：database_query 相关字段
+    pub connection_string: Option<String>,
+    pub sql: Option<String>,
+    pub params: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +97,10 @@ fn parse_intent(payload: &IntentPayload) -> Result<Intent> {
             path: payload.path.clone().unwrap_or_default(),
             confirm: payload.confirm.clone().unwrap_or_else(|| "no".to_string()),
         }),
+        "workspace_mkdir" => Ok(Intent::WorkspaceMkdir {
+            path: payload.path.clone().unwrap_or_default(),
+            recursive: payload.recursive.unwrap_or(false),
+        }),
         "permission_check" => Ok(Intent::PermissionCheck {
             resource: payload.resource.clone().unwrap_or_default(),
             action: payload.action.clone().unwrap_or_default(),
@@ -92,6 +116,34 @@ fn parse_intent(payload: &IntentPayload) -> Result<Intent> {
             url: payload.url.clone().unwrap_or_default(),
         }),
         "browser_screenshot" => Ok(Intent::BrowserScreenshot),
+        "http_request" => Ok(Intent::HttpRequest {
+            method: payload.method.clone().unwrap_or_else(|| "GET".to_string()),
+            url: payload.url.clone().ok_or_else(|| anyhow::anyhow!("missing url"))?,
+            headers: payload.headers.clone(),
+            body: payload.body.clone(),
+            proxy: payload.proxy.clone(),
+        }),
+        "crypto_hash" => Ok(Intent::CryptoHash {
+            input: payload.input.clone().unwrap_or_default(),
+        }),
+        "workspace_rename" => Ok(Intent::WorkspaceRename {
+            old_path: payload.old_path.clone().unwrap_or_default(),
+            new_path: payload.new_path.clone().unwrap_or_default(),
+        }),
+        "crypto_sign" => Ok(Intent::CryptoSign {
+            private_key_hex: payload.private_key_hex.clone().unwrap_or_default(),
+            message: payload.message.clone().unwrap_or_default(),
+        }),
+        "crypto_verify" => Ok(Intent::CryptoVerify {
+            public_key_hex: payload.public_key_hex.clone().unwrap_or_default(),
+            message: payload.message.clone().unwrap_or_default(),
+            signature_hex: payload.signature_hex.clone().unwrap_or_default(),
+        }),
+        "database_query" => Ok(Intent::DatabaseQuery {
+            connection_string: payload.connection_string.clone().unwrap_or_default(),
+            sql: payload.sql.clone().unwrap_or_default(),
+            params: payload.params.clone().unwrap_or_default(),
+        }),
         _ => Err(anyhow::anyhow!("Unsupported intent type: {}", payload.intent_type)),
     }
 }
@@ -181,7 +233,7 @@ pub async fn start_server(
         .route("/metrics", get(metrics_handler))
         .with_state(state);
 
-    let addr = "127.0.0.1:3000";
+    let addr = "127.0.0.1:3001";
     let listener = TcpListener::bind(addr).await?;
     println!("🚀 Server listening on http://{}", addr);
     axum::serve(listener, app).await?;
