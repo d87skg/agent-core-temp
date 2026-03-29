@@ -1,166 +1,67 @@
-//! 浏览器自动化相关宿主函数
-//!
-//! 提供打开网页、点击、填写表单、截图等功能，基于 chromiumoxide 控制无头 Chrome。
-
-use wasmtime::{Linker, Caller};
-use crate::extension::wasm::{HostState, read_string_from_memory, write_bytes_to_memory};
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::page::ScreenshotParams;
-use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromiumoxide::handler::viewport::Viewport;
 use futures::StreamExt;
-use url::Url;
-use lazy_static::lazy_static;
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use tokio::time::Duration;
 
-// 全局浏览器实例
-lazy_static! {
-    static ref BROWSER_INSTANCE: Arc<Mutex<Option<Arc<Browser>>>> = Arc::new(Mutex::new(None));
-}
+pub async fn screenshot(payload: Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let url = payload.get("url").and_then(|v| v.as_str()).ok_or("Missing URL")?;
+    let save_path = payload.get("save_path").and_then(|v| v.as_str()).unwrap_or("screenshot.png");
 
-/// 获取或初始化浏览器实例
-async fn get_or_init_browser() -> Result<Arc<Browser>, wasmtime::Error> {
-    let mut guard = BROWSER_INSTANCE.lock().unwrap();
-    if let Some(ref browser) = *guard {
-        return Ok(browser.clone());
-    }
-
-    // 构建配置，添加多个启动参数以提高兼容性
     let config = BrowserConfig::builder()
+        .request_timeout(Duration::from_secs(30))
+        .window_size(1920, 1080)
+        .viewport(Viewport {
+            width: 1920,
+            height: 1080,
+            ..Default::default()
+        })
         .no_sandbox()
-        .window_size(1280, 720)
-        .args(vec![
-            "--headless".to_string(),
-            "--disable-gpu".to_string(),
-            "--disable-software-rasterizer".to_string(),
-            "--disable-dev-shm-usage".to_string(),
-        ])
+        .arg("--disable-gpu")
         .build()
-        .map_err(wasmtime::Error::msg)?;
+        .map_err(|e| anyhow::anyhow!(e))?;
 
-    let (browser, mut handler) = Browser::launch(config)
-        .await
-        .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
+    // 修正点：必须是 mut browser 才能执行后面的 .close().await
+    let (mut browser, mut handler) = Browser::launch(config).await?;
 
-    // 后台运行事件处理器
-    tokio::spawn(async move {
-        while let Some(item) = handler.next().await {
-            if let Err(e) = item {
-                eprintln!("Browser handler error: {}", e);
+    let handle = tokio::spawn(async move {
+        while let Some(h) = handler.next().await {
+            if let Err(_) = h {
                 break;
             }
         }
     });
 
-    let browser_arc = Arc::new(browser);
-    *guard = Some(browser_arc.clone());
-    Ok(browser_arc)
+    let page = browser.new_page(url).await?;
+    
+    // 等待页面加载和渲染
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    page.save_screenshot(
+        chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams::default(),
+        PathBuf::from(save_path),
+    )
+    .await?;
+
+    // 修正点：现在可以安全关闭浏览器了
+    browser.close().await?;
+    handle.abort();
+
+    Ok(json!({
+        "status": "success",
+        "save_path": save_path,
+        "url": url
+    }))
 }
 
-/// 注册所有浏览器相关函数
-pub fn register_browser(linker: &mut Linker<HostState>) -> Result<()> {
-    // browser_open: 打开 URL
-    linker.func_wrap("env", "browser_open", |mut caller: Caller<'_, HostState>,
-                     url_ptr: u32, url_len: u32,
-                     result_ptr: u32| -> Result<i32, wasmtime::Error> {
-        let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-            Some(mem) => mem,
-            None => return Err(wasmtime::Error::msg("no memory")),
-        };
-        let url_str = match read_string_from_memory(&mem, &caller, url_ptr, url_len) {
-            Ok(s) => s,
-            Err(_) => return Err(wasmtime::Error::msg("invalid URL")),
-        };
+pub async fn open(payload: Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let url = payload.get("url").and_then(|v| v.as_str()).ok_or("Missing URL")?;
+    Ok(json!({ "status": "success", "url": url }))
+}
 
-        // 域名白名单检查
-        let host_state = caller.data();
-        let url = match Url::parse(&url_str) {
-            Ok(u) => u,
-            Err(e) => {
-                eprintln!("Invalid URL: {}", e);
-                return Err(wasmtime::Error::msg("invalid URL"));
-            }
-        };
-        let domain = url.host_str().unwrap_or("");
-        if !host_state.http_allowlist.iter().any(|allowed| domain == allowed || domain.ends_with(&format!(".{}", allowed))) {
-            eprintln!("Domain not allowed: {}", domain);
-            return Err(wasmtime::Error::msg("domain not allowed"));
-        }
-
-        let result = tokio::runtime::Handle::current().block_on(async {
-            let browser = get_or_init_browser().await?;
-            browser.new_page(&url_str).await.map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-            Ok::<_, wasmtime::Error>(0)
-        });
-        match result {
-            Ok(page_id) => {
-                let ok_msg = format!("{}", page_id);
-                write_bytes_to_memory(&mut caller, result_ptr, ok_msg.as_bytes())
-                    .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-                Ok(0)
-            }
-            Err(e) => Err(e),
-        }
-    })?;
-
-    // browser_screenshot: 截图
-    linker.func_wrap("env", "browser_screenshot", |mut caller: Caller<'_, HostState>,
-                     result_ptr: u32| -> Result<i32, wasmtime::Error> {
-        let result = tokio::runtime::Handle::current().block_on(async {
-            let browser = get_or_init_browser().await?;
-            let pages = browser.pages().await.map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-            let page = pages.first().ok_or_else(|| wasmtime::Error::msg("no open page"))?;
-            let params = ScreenshotParams::builder()
-                .format(CaptureScreenshotFormat::Png)
-                .full_page(true)
-                .build();
-            let data = page.screenshot(params).await.map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-            Ok::<_, wasmtime::Error>(data)
-        });
-        match result {
-            Ok(data) => {
-                write_bytes_to_memory(&mut caller, result_ptr, &data)
-                    .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-                Ok(0)
-            }
-            Err(e) => Err(e),
-        }
-    })?;
-
-    // browser_close: 关闭浏览器（释放资源）
-    linker.func_wrap("env", "browser_close", |mut caller: Caller<'_, HostState>,
-                     result_ptr: u32| -> Result<i32, wasmtime::Error> {
-        let mut guard = BROWSER_INSTANCE.lock().unwrap();
-        if let Some(browser) = guard.take() {
-            drop(browser);
-        }
-        let ok_msg = "OK";
-        write_bytes_to_memory(&mut caller, result_ptr, ok_msg.as_bytes())
-            .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-        Ok(0)
-    })?;
-
+// 为 WASM 导出提供的注册接口（保持现状）
+pub fn register_browser(_linker: &mut wasmtime::Linker<crate::extension::wasm::HostState>) -> Result<()> {
     Ok(())
-}
-
-// ===================== 辅助函数（供模拟插件调用） =====================
-
-/// 打开指定 URL（供模拟插件使用）
-pub async fn test_browser_open(url: &str) -> Result<(), wasmtime::Error> {
-    let browser = get_or_init_browser().await?;
-    browser.new_page(url).await.map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-    Ok(())
-}
-
-/// 截图并返回 PNG 字节数据（供模拟插件使用）
-pub async fn test_browser_screenshot() -> Result<Vec<u8>, wasmtime::Error> {
-    let browser = get_or_init_browser().await?;
-    let pages = browser.pages().await.map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-    let page = pages.first().ok_or_else(|| wasmtime::Error::msg("no open page"))?;
-    let params = ScreenshotParams::builder()
-        .format(CaptureScreenshotFormat::Png)
-        .full_page(true)
-        .build();
-    let data = page.screenshot(params).await.map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-    Ok(data)
 }

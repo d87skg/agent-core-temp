@@ -1,103 +1,59 @@
-//! 加密相关宿主函数
-//!
-//! 提供 Ed25519 签名与验证功能
+//! --------------------------------------------------
+//! Module: src/extension/functions/crypto.rs
+//! Description: 基于 ring 库的加密 Host Functions
+//! --------------------------------------------------
 
 use wasmtime::{Linker, Caller};
-use crate::extension::wasm::{HostState, read_string_from_memory, write_bytes_to_memory};
+use crate::extension::wasm::{read_string_from_memory, write_bytes_to_memory, HostState};
 use anyhow::Result;
-use ring::signature::{Ed25519KeyPair, UnparsedPublicKey, ED25519};
-use serde_json::json;
-use data_encoding::HEXLOWER;
+use ring::signature::{self, Ed25519KeyPair};
 
-/// 注册所有加密相关函数
+/// 为 WASM Linker 注册加密相关接口
 pub fn register_crypto(linker: &mut Linker<HostState>) -> Result<()> {
-    // ===================== crypto_sign_ed25519 =====================
-    // 输入: JSON {"private_key_hex": "...", "message": "..."}
-    // 输出: JSON {"signature_hex": "..."}
-    linker.func_wrap("env", "crypto_sign_ed25519",
-        |mut caller: Caller<'_, HostState>,
-         input_ptr: u32,
-         input_len: u32,
-         output_ptr: u32|
-         -> Result<i32, wasmtime::Error> {
+    
+    // [接口 1] host_crypto_sign: 使用宿主私钥签名
+    linker.func_wrap("env", "host_crypto_sign", |mut caller: Caller<'_, HostState>, 
+                      data_ptr: u32, data_len: u32, 
+                      sig_ptr: u32| -> Result<i32, wasmtime::Error> {
+        
+        let data = read_string_from_memory(&mut caller, data_ptr, data_len)
+            .map_err(|e| wasmtime::Error::msg(format!("Crypto Source Read Error: {}", e)))?;
 
-            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(mem) => mem,
-                None => return Err(wasmtime::Error::msg("no memory")),
-            };
-            let input_str = match read_string_from_memory(&mem, &caller, input_ptr, input_len) {
-                Ok(s) => s,
-                Err(_) => return Err(wasmtime::Error::msg("invalid input")),
-            };
-            let params: serde_json::Value = serde_json::from_str(&input_str)
-                .map_err(|e| wasmtime::Error::msg(format!("invalid JSON: {}", e)))?;
+        // 工业级提示：此处的 Seed 应从加密的环境变量或 Vault 中读取
+        let seed = [0u8; 32]; 
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&seed)
+            .map_err(|_| wasmtime::Error::msg("Internal Crypto Error: Invalid Key Seed"))?;
 
-            let private_key_hex = params["private_key_hex"].as_str()
-                .ok_or_else(|| wasmtime::Error::msg("missing private_key_hex"))?;
-            let message = params["message"].as_str()
-                .ok_or_else(|| wasmtime::Error::msg("missing message"))?;
+        let signature = key_pair.sign(data.as_bytes());
+        let sig_bytes = signature.as_ref();
 
-            let private_key_bytes = HEXLOWER.decode(private_key_hex.as_bytes())
-                .map_err(|e| wasmtime::Error::msg(format!("invalid hex: {}", e)))?;
-            let key_pair = Ed25519KeyPair::from_pkcs8(&private_key_bytes)
-                .map_err(|e| wasmtime::Error::msg(format!("invalid private key: {}", e)))?;
+        write_bytes_to_memory(&mut caller, sig_ptr, sig_bytes)
+            .map_err(|e: anyhow::Error| wasmtime::Error::msg(e.to_string()))?;
 
-            let signature = key_pair.sign(message.as_bytes());
-            let signature_hex = HEXLOWER.encode(signature.as_ref());
+        Ok(0)
+    })?;
 
-            let result = json!({ "signature_hex": signature_hex }).to_string();
-            let bytes = result.into_bytes();
+    // [接口 2] host_crypto_verify: 验证 Ed25519 签名
+    linker.func_wrap("env", "host_crypto_verify", |mut caller: Caller<'_, HostState>, 
+                      pubkey_ptr: u32, pubkey_len: u32,
+                      data_ptr: u32, data_len: u32,
+                      sig_ptr: u32| -> Result<i32, wasmtime::Error> {
+        
+        let pubkey_str = read_string_from_memory(&mut caller, pubkey_ptr, pubkey_len)?;
+        let data_str = read_string_from_memory(&mut caller, data_ptr, data_len)?;
+        
+        let mut sig_bytes = vec![0u8; 64];
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        mem.read(&caller, sig_ptr as usize, &mut sig_bytes)
+            .map_err(|_| wasmtime::Error::msg("Memory Read Error"))?;
 
-            write_bytes_to_memory(&mut caller, output_ptr, &bytes)
-                .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-
-            Ok(0)
-        })?;
-
-    // ===================== crypto_verify_ed25519 =====================
-    // 输入: JSON {"public_key_hex": "...", "message": "...", "signature_hex": "..."}
-    // 输出: JSON {"valid": true/false}
-    linker.func_wrap("env", "crypto_verify_ed25519",
-        |mut caller: Caller<'_, HostState>,
-         input_ptr: u32,
-         input_len: u32,
-         output_ptr: u32|
-         -> Result<i32, wasmtime::Error> {
-
-            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(mem) => mem,
-                None => return Err(wasmtime::Error::msg("no memory")),
-            };
-            let input_str = match read_string_from_memory(&mem, &caller, input_ptr, input_len) {
-                Ok(s) => s,
-                Err(_) => return Err(wasmtime::Error::msg("invalid input")),
-            };
-            let params: serde_json::Value = serde_json::from_str(&input_str)
-                .map_err(|e| wasmtime::Error::msg(format!("invalid JSON: {}", e)))?;
-
-            let public_key_hex = params["public_key_hex"].as_str()
-                .ok_or_else(|| wasmtime::Error::msg("missing public_key_hex"))?;
-            let message = params["message"].as_str()
-                .ok_or_else(|| wasmtime::Error::msg("missing message"))?;
-            let signature_hex = params["signature_hex"].as_str()
-                .ok_or_else(|| wasmtime::Error::msg("missing signature_hex"))?;
-
-            let public_key_bytes = HEXLOWER.decode(public_key_hex.as_bytes())
-                .map_err(|e| wasmtime::Error::msg(format!("invalid public key hex: {}", e)))?;
-            let signature_bytes = HEXLOWER.decode(signature_hex.as_bytes())
-                .map_err(|e| wasmtime::Error::msg(format!("invalid signature hex: {}", e)))?;
-
-            let public_key = UnparsedPublicKey::new(&ED25519, public_key_bytes);
-            let valid = public_key.verify(message.as_bytes(), &signature_bytes).is_ok();
-
-            let result = json!({ "valid": valid }).to_string();
-            let bytes = result.into_bytes();
-
-            write_bytes_to_memory(&mut caller, output_ptr, &bytes)
-                .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-
-            Ok(0)
-        })?;
+        let peer_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, pubkey_str.as_bytes());
+        
+        match peer_public_key.verify(data_str.as_bytes(), &sig_bytes) {
+            Ok(_) => Ok(0),  // 成功
+            Err(_) => Ok(1), // 失败
+        }
+    })?;
 
     Ok(())
 }

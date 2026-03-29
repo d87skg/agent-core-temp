@@ -67,7 +67,8 @@ pub fn register_database(linker: &mut Linker<HostState>) -> Result<()> {
             // 准备 SQL 并获取列名
             let mut stmt = conn.prepare(sql)
                 .map_err(|e| wasmtime::Error::msg(format!("prepare failed: {}", e)))?;
-            let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            // 明确告诉它是 Vec<String>
+let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
             // 转换参数：注意这里需要将每个值转换为字符串，并确保生命周期有效
             // 使用 String 而非 &str 以避免临时借用

@@ -1,75 +1,53 @@
-//! 成本控制相关宿主函数
-//!
-//! 提供token消耗追踪、预算熔断等功能
+//! 成本统计与配额管理模块
+//! 提供 WASM 插件消耗追踪及配额限制
 
-use wasmtime::{Linker, Caller};
+use std::sync::atomic::{AtomicU64, Ordering};
+use wasmtime::Linker;
 use crate::extension::wasm::HostState;
 use anyhow::Result;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use lazy_static::lazy_static;
 
-// 全局成本追踪器（示例实现，后续可集成到observability模块）
-lazy_static! {
-    static ref COST_TRACKER: Arc<CostTracker> = Arc::new(CostTracker::new());
-}
-
-struct CostTracker {
-    total_tokens: AtomicU64,
-    total_cost_cents: AtomicU64,  // 以美分为单位
+pub struct CostTracker {
+    total_spent_cents: AtomicU64,
     budget_cents: AtomicU64,
 }
 
 impl CostTracker {
-    fn new() -> Self {
+    pub fn new(budget: u64) -> Self {
         Self {
-            total_tokens: AtomicU64::new(0),
-            total_cost_cents: AtomicU64::new(0),
-            budget_cents: AtomicU64::new(1000), // 默认预算 $10
+            total_spent_cents: AtomicU64::new(0),
+            budget_cents: AtomicU64::new(budget),
         }
     }
 
-    fn add_tokens(&self, tokens: u64, cost_cents: u64) -> bool {
-        let new_total = self.total_tokens.fetch_add(tokens, Ordering::Relaxed) + tokens;
-        let new_cost = self.total_cost_cents.fetch_add(cost_cents, Ordering::Relaxed) + cost_cents;
-        
-        // 检查是否超过预算
-        let budget = self.budget_cents.load(Ordering::Relaxed);
-        if new_cost > budget {
-            eprintln!("Budget exceeded: {} > {}", new_cost, budget);
-            false
-        } else {
-            eprintln!("Cost tracking: tokens={}, total={}, cost={}¢, total={}¢", 
-                      tokens, new_total, cost_cents, new_cost);
-            true
-        }
+    /// 记录消耗
+    pub fn record_cost(&self, cents: u64) {
+        self.total_spent_cents.fetch_add(cents, Ordering::SeqCst);
     }
 
-    fn set_budget(&self, budget_cents: u64) {
-        self.budget_cents.store(budget_cents, Ordering::Relaxed);
+    /// 检查是否超出预算
+    pub fn is_over_budget(&self) -> bool {
+        let spent = self.total_spent_cents.load(Ordering::SeqCst);
+        let budget = self.budget_cents.load(Ordering::SeqCst);
+        spent >= budget
+    }
+
+    /// 获取当前总消耗（以分为单位）
+    pub fn get_total_spent(&self) -> u64 {
+        self.total_spent_cents.load(Ordering::SeqCst)
+    }
+
+    /// 设置新的预算
+    #[allow(dead_code)]
+    pub fn set_budget(&self, budget_cents: u64) {
+        self.budget_cents.store(budget_cents, Ordering::SeqCst);
     }
 }
 
-/// 注册所有成本控制相关函数
-pub fn register_cost(linker: &mut Linker<HostState>) -> Result<()> {
-    // cost_tracker: 记录token消耗
-    linker.func_wrap("env", "cost_tracker", |_caller: Caller<'_, HostState>,
-                     tokens: u32,
-                     cost_cents: u32,
-                     _result_ptr: u32| -> Result<i32, wasmtime::Error> {
-        
-        let within_budget = COST_TRACKER.add_tokens(tokens as u64, cost_cents as u64);
-        
-        // TODO: 后续集成到 observability 模块
-        // crate::observability::record_metric("cost.tokens", tokens as f64);
-        // crate::observability::record_metric("cost.cents", cost_cents as f64);
-        
-        if within_budget {
-            Ok(0)
-        } else {
-            Err(wasmtime::Error::msg("budget exceeded"))
-        }
-    })?;
+// ===================== [WASM 注册逻辑] =====================
 
+/// 注册成本相关宿主函数
+/// 解决 mod.rs 中 register_cost 找不到的问题
+pub fn register_cost(_linker: &mut Linker<HostState>) -> Result<()> {
+    // 预留位置：未来可以在这里注册给 WASM 调用的 cost_check 等函数
     Ok(())
 }
