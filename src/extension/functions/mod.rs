@@ -1,11 +1,12 @@
+// 文件路径: src/extension/functions/mod.rs
+
+pub mod crypto; // 👈 必须添加这一行，告诉 Rust 这里有一个 crypto.rs 文件
+
 use wasmtime::Linker;
 use crate::extension::wasm::HostState;
+use crate::extension::functions::crypto::register_crypto; 
 
-/// 🚀 彻底同步化：清空所有子模块注册
-/// 确保不触发 Wasmtime 的 "cannot use func_wrap_async" 运行时检查
-pub fn register_all(_linker: &mut Linker<HostState>) -> anyhow::Result<()> {
-    // 所有的 http::register, fs::register, crypto::register 均已移除
-    // 这样 Linker 内部就不会包含任何异步函数定义
-    
+pub fn register_all(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
+    register_crypto(linker)?;
     Ok(())
 }
