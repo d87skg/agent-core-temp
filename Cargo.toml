@@ -6,106 +6,95 @@ rust-version = "1.78.0"
 authors = ["d87skg <jmhbldg@gmail.com>"]
 license = "MIT OR Apache-2.0"
 description = "A modular Rust execution engine for AI agents"
-repository = "https://github.com/d87skg/agent-core-temp"
-documentation = "https://docs.rs/agent-core"
-readme = "README.md"
-keywords = ["ai", "agent", "workflow", "execution", "runtime"]
-categories = ["development-tools", "asynchronous"]
+
+[features]
+default = []
+# 工业级配置：只有开启此 feature 时才引入并编译 redis 依赖
+redis-scheduler = ["dep:redis"]
+
+[lib]
+name = "agent_core_temp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-core-temp"
+path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.40", features = ["full", "rt-multi-thread", "tracing"] }
+# 基础异步与并发
+tokio = { version = "1.40", features = ["full", "rt-multi-thread", "tracing", "sync", "macros"] }
 dashmap = "5.5"
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
 arc-swap = "1.6"
 petgraph = "0.6"
 once_cell = "1.19"
+lazy_static = "1.4"
+futures = "0.3"
+async-trait = "0.1"
+pin-project = "1.1"
+
+# 序列化与数据处理
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1.0"
+serde_urlencoded = "0.7"
+url = "2.5"
+urlencoding = "2.1"
+base64 = "0.22"
+hex = "0.4"
+data-encoding = "2.5"
+
+# 错误处理与日志
 anyhow = "1.0"
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.22"
-opentelemetry = "0.21"
-metrics = "0.23"
-metrics-exporter-prometheus = "0.15"
-metrics-util = "0.17"
-futures = "0.3"
-pin-project = "1.1"
-uuid = { version = "1.6", features = ["v4", "serde"] }
-axum = "0.7"
+
+# 网络与 HTTP
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "blocking"] }
+axum = { version = "0.7", features = ["macros"] }
+backon = "1.5.0"
+http = "1.1"
+
+# 安全与加密
 zeroize = { version = "1.7", features = ["derive"] }
 secrecy = { version = "0.8", features = ["serde"] }
 memsec = "0.7"
 libc = "0.2"
 sha2 = "0.10"
-hex = "0.4"
 ring = "0.17"
-base64 = "0.22"
-prometheus = "0.13"
-chrono = "0.4"
-wasmtime = { version = "26", features = ["async", "cranelift", "parallel-compilation"] }
-wasmtime-wasi = "26"
-async-trait = "0.1"
-lru = "0.10"
-wat = "1.0"
-rand = "0.8"
-url = "2.5"
-urlencoding = "2.1"
-chromiumoxide = { version = "0.5", features = ["tokio-runtime"] }
 hmac = "0.12"
-serde_urlencoded = "0.7"
-rusqlite = { version = "0.31", features = ["bundled"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core", "serde"] }
 
-# 新增/调整的依赖
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "blocking"] }
-backon = "1.5.0"
-lazy_static = "1.4"
-data-encoding = "2.5"
-
-# 可选依赖
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
-sled = { version = "0.34", optional = true }
-
-[dev-dependencies]
-tokio = { version = "1.40", features = ["full", "test-util"] }
-tempfile = "3.8"
-assert_cmd = "2.0"
-predicates = "3.0"
+# 工具与数据库
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
 rand = "0.8"
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
-proptest = "1.5"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] } # 用于测试
+lru = "0.10"
+walkdir = "2.5"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sled = "0.34"
 
-[features]
-default = []
-redis-scheduler = ["redis"]
-sled-storage = ["sled"]
+# WASM 运行时 (核心组件)
+wasmtime = { version = "26.0.0", features = ["async", "cranelift", "parallel-compilation", "component-model"] }
+wasmtime-wasi = "26.0.0"
+wat = "1.0"
+
+# 浏览器自动化与扩展
+chromiumoxide = { version = "0.6", features = ["tokio-runtime"] }
+instant-distance = "0.6.1"
+
+# 可观测性 (可根据需要开启)
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+metrics-util = "0.17"
+
+# 扩展功能：Redis 支持 (默认不启用，需通过 feature 开启)
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
 
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
 strip = "symbols"
-
-[[bench]]
-name = "performance"
-harness = false
-
-[[bench]]
-name = "idempotency_benchmark"
-harness = false
-
-[[bench]]
-name = "idempotency_bench"
-harness = false
-
-[[bench]]
-name = "scheduler_bench"
-harness = false
-
-[[bench]]
-name = "wasm_bench"
-harness = false
