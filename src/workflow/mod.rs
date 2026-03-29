@@ -1,50 +1,69 @@
-use std::collections::{HashMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use anyhow::Result;
+//! --------------------------------------------------
+//! Project: Agent-Core
+//! Module: src/workflow/mod.rs
+//! Description: 工业级 DAG 编排引擎 (含数据库查询接口)
+//! --------------------------------------------------
+
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use backon::{ExponentialBuilder, Retryable};
+use ed25519_dalek::SigningKey;
 use petgraph::graph::DiGraph;
 use petgraph::Direction;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sled::Db;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::extension::Extension;
 
-// ================= 意图定义 =================
+// ================= [Web4 安全核心：能力令牌] =================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityToken {
+    pub fs_whitelist: HashSet<String>,
+    pub allowed_methods: HashSet<String>,
+    pub mem_limit_mb: u32,
+}
+
+impl CapabilityToken {
+    pub fn crypto_only() -> Self {
+        let mut methods = HashSet::new();
+        methods.insert("crypto_sign".to_string());
+        methods.insert("crypto_verify".to_string());
+        Self {
+            fs_whitelist: HashSet::new(),
+            allowed_methods: methods,
+            mem_limit_mb: 128,
+        }
+    }
+
+    pub fn fs_only(paths: Vec<String>) -> Self {
+        let mut methods = HashSet::new();
+        methods.insert("workspace_mkdir".to_string());
+        methods.insert("workspace_read".to_string());
+        Self {
+            fs_whitelist: paths.into_iter().collect(),
+            allowed_methods: methods,
+            mem_limit_mb: 64,
+        }
+    }
+}
+
+// ================= [意图与任务定义] =================
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Intent {
     Transfer { to: String, amount: u64, asset: String },
-    Swap { from: String, to: String, amount: u64 },
-    Stake { pool: String, amount: u64, lock_period: Option<u64> },
-
     EchoText { text: String },
-    HttpPost { url: String, body: Option<String> },
-    WorkspaceRead { path: String },
-    WorkspaceDelete { path: String, confirm: String },
     WorkspaceMkdir { path: String, recursive: bool },
-    PermissionCheck { resource: String, action: String },
-    CostTracker { tokens: u64, cost_cents: u64 },
-    WebSearch { query: String },
-
-    BrowserOpen { url: String },
-    BrowserScreenshot,
-
-    HttpRequest {
-        method: String,
-        url: String,
-        headers: Option<HashMap<String, String>>,
-        body: Option<String>,
-        proxy: Option<String>,
-    },
-
-    CryptoHash { input: String },
-
-    // 新增意图
-    WorkspaceRename { old_path: String, new_path: String },
     CryptoSign { private_key_hex: String, message: String },
-    CryptoVerify { public_key_hex: String, message: String, signature_hex: String },
-    DatabaseQuery { connection_string: String, sql: String, params: Vec<serde_json::Value> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,9 +72,10 @@ pub struct Task {
     pub name: String,
     pub input: Vec<u8>,
     pub dependencies: Vec<String>,
+    pub token: Option<CapabilityToken>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
     Pending,
     Running,
@@ -63,227 +83,211 @@ pub enum TaskStatus {
     Failed(String),
 }
 
-pub trait WorkflowCompiler: Send + Sync {
-    fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>>;
-}
+// ================= [执行器接口定义] =================
 
-pub struct SimpleCompiler;
-
-impl WorkflowCompiler for SimpleCompiler {
-    fn compile(&self, intent: Intent) -> Pin<Box<dyn Future<Output = Result<Vec<Task>>> + Send>> {
-        Box::pin(async move {
-            let tasks = match intent {
-                Intent::Transfer { to, amount, asset } => vec![
-                    Task { id: "1".into(), name: "validate_account".into(), input: format!(r#"{{"to":"{}"}}"#, to).into_bytes(), dependencies: vec![] },
-                    Task { id: "2".into(), name: "execute_transfer".into(), input: format!(r#"{{"amount":{},"asset":"{}"}}"#, amount, asset).into_bytes(), dependencies: vec!["1".into()] },
-                ],
-                Intent::Swap { from, to, amount } => vec![
-                    Task { id: "1".into(), name: "check_balance".into(), input: format!(r#"{{"asset":"{}","amount":{}}}"#, from, amount).into_bytes(), dependencies: vec![] },
-                    Task { id: "2".into(), name: "execute_swap".into(), input: format!(r#"{{"from":"{}","to":"{}","amount":{}}}"#, from, to, amount).into_bytes(), dependencies: vec!["1".into()] },
-                ],
-                Intent::Stake { pool, amount, lock_period } => {
-                    let lock = lock_period.unwrap_or(0);
-                    vec![
-                        Task { id: "1".into(), name: "approve_stake".into(), input: format!(r#"{{"pool":"{}","amount":{}}}"#, pool, amount).into_bytes(), dependencies: vec![] },
-                        Task { id: "2".into(), name: "stake_tokens".into(), input: format!(r#"{{"pool":"{}","amount":{},"lock_period":{}}}"#, pool, amount, lock).into_bytes(), dependencies: vec!["1".into()] },
-                    ]
-                }
-                Intent::EchoText { text } => {
-                    vec![Task { id: "echo_1".into(), name: "echo_text".into(), input: serde_json::to_vec(&serde_json::json!({ "text": text }))?, dependencies: vec![] }]
-                }
-                Intent::HttpPost { url, body } => {
-                    vec![Task { id: "http_1".into(), name: "http_post".into(), input: serde_json::to_vec(&serde_json::json!({ "url": url, "body": body }))?, dependencies: vec![] }]
-                }
-                Intent::WorkspaceRead { path } => {
-                    vec![Task { id: "read_1".into(), name: "workspace_read".into(), input: serde_json::to_vec(&serde_json::json!({ "path": path }))?, dependencies: vec![] }]
-                }
-                Intent::WorkspaceDelete { path, confirm } => {
-                    vec![Task {
-                        id: Uuid::new_v4().to_string(),
-                        name: "workspace_delete".to_string(),
-                        input: serde_json::to_vec(&serde_json::json!({ "path": path, "confirm": confirm }))?,
-                        dependencies: vec![],
-                    }]
-                }
-                Intent::WorkspaceMkdir { path, recursive } => {
-                    vec![Task {
-                        id: Uuid::new_v4().to_string(),
-                        name: "workspace_mkdir".to_string(),
-                        input: serde_json::to_vec(&serde_json::json!({ "path": path, "recursive": recursive }))?,
-                        dependencies: vec![],
-                    }]
-                }
-                Intent::PermissionCheck { resource, action } => {
-                    vec![Task { id: "perm_1".into(), name: "permission_check".into(), input: serde_json::to_vec(&serde_json::json!({ "resource": resource, "action": action }))?, dependencies: vec![] }]
-                }
-                Intent::CostTracker { tokens, cost_cents } => {
-                    vec![Task { id: "cost_1".into(), name: "cost_tracker".into(), input: serde_json::to_vec(&serde_json::json!({ "tokens": tokens, "cost_cents": cost_cents }))?, dependencies: vec![] }]
-                }
-                Intent::WebSearch { query } => {
-                    vec![Task { id: "search_1".into(), name: "web_search".into(), input: serde_json::to_vec(&serde_json::json!({ "query": query }))?, dependencies: vec![] }]
-                }
-                Intent::BrowserOpen { url } => {
-                    vec![Task { id: "browser_open_1".into(), name: "browser_open".into(), input: serde_json::to_vec(&serde_json::json!({ "url": url }))?, dependencies: vec![] }]
-                }
-                Intent::BrowserScreenshot => {
-                    vec![Task { id: "browser_screenshot_1".into(), name: "browser_screenshot".into(), input: serde_json::to_vec(&serde_json::json!({}))?, dependencies: vec![] }]
-                }
-                Intent::HttpRequest { method, url, headers, body, proxy } => {
-                    let input = serde_json::to_vec(&serde_json::json!({
-                        "method": method,
-                        "url": url,
-                        "headers": headers,
-                        "body": body,
-                        "proxy": proxy,
-                    }))?;
-                    vec![Task {
-                        id: Uuid::new_v4().to_string(),
-                        name: "http_request".to_string(),
-                        input,
-                        dependencies: vec![],
-                    }]
-                }
-                Intent::CryptoHash { input } => {
-                    vec![Task {
-                        id: Uuid::new_v4().to_string(),
-                        name: "crypto_hash".to_string(),
-                        input: serde_json::to_vec(&serde_json::json!({ "input": input }))?,
-                        dependencies: vec![],
-                    }]
-                }
-                // 新增分支
-                Intent::WorkspaceRename { old_path, new_path } => {
-                    vec![Task {
-                        id: Uuid::new_v4().to_string(),
-                        name: "workspace_rename".to_string(),
-                        input: serde_json::to_vec(&serde_json::json!({ "old_path": old_path, "new_path": new_path }))?,
-                        dependencies: vec![],
-                    }]
-                }
-                Intent::CryptoSign { private_key_hex, message } => {
-                    vec![Task {
-                        id: Uuid::new_v4().to_string(),
-                        name: "crypto_sign_ed25519".to_string(),
-                        input: serde_json::to_vec(&serde_json::json!({ "private_key_hex": private_key_hex, "message": message }))?,
-                        dependencies: vec![],
-                    }]
-                }
-                Intent::CryptoVerify { public_key_hex, message, signature_hex } => {
-                    vec![Task {
-                        id: Uuid::new_v4().to_string(),
-                        name: "crypto_verify_ed25519".to_string(),
-                        input: serde_json::to_vec(&serde_json::json!({ "public_key_hex": public_key_hex, "message": message, "signature_hex": signature_hex }))?,
-                        dependencies: vec![],
-                    }]
-                }
-                Intent::DatabaseQuery { connection_string, sql, params } => {
-                    vec![Task {
-                        id: Uuid::new_v4().to_string(),
-                        name: "database_query".to_string(),
-                        input: serde_json::to_vec(&serde_json::json!({ "connection_string": connection_string, "sql": sql, "params": params }))?,
-                        dependencies: vec![],
-                    }]
-                }
-            };
-            Ok(tasks)
-        })
-    }
-}
-
+#[async_trait]
 pub trait WorkflowExecutor: Send + Sync {
-    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
-    fn status(&self, task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>>;
+    async fn execute(&self, tasks: Vec<Task>) -> Result<Vec<String>>;
+    async fn status(&self, task_id: &str) -> Option<TaskStatus>;
 }
 
 pub struct ParallelExecutor {
     plugin: Arc<dyn Extension>,
+    pub(crate) results_cache: Arc<Mutex<HashMap<String, Value>>>,
+    pub(crate) db: Db,
+    _signing_key: SigningKey,
 }
 
 impl ParallelExecutor {
-    pub fn new(plugin: Arc<dyn Extension>) -> Self {
-        Self { plugin }
-    }
-}
-
-impl WorkflowExecutor for ParallelExecutor {
-    fn execute(&self, tasks: Vec<Task>) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>> {
-        let plugin = self.plugin.clone();
-        Box::pin(async move {
-            let mut id_to_idx = HashMap::new();
-            for (i, t) in tasks.iter().enumerate() {
-                id_to_idx.insert(t.id.clone(), i);
+    pub fn new(plugin: Arc<dyn Extension>, db_path: &str) -> Result<Self> {
+        let db = sled::open(db_path)?;
+        
+        let key_path = std::path::Path::new(db_path).join("identity.key");
+        let signing_key = if key_path.exists() {
+            let key_bytes = std::fs::read(&key_path)?;
+            let array: [u8; 32] = key_bytes.try_into().map_err(|_| anyhow!("Invalid identity key file"))?;
+            SigningKey::from_bytes(&array)
+        } else {
+            let mut key_bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut key_bytes);
+            let key = SigningKey::from_bytes(&key_bytes);
+            if !std::path::Path::new(db_path).exists() {
+                std::fs::create_dir_all(db_path)?;
             }
+            std::fs::write(&key_path, key.to_bytes())?;
+            key
+        };
 
-            let mut graph = DiGraph::<usize, ()>::new();
-            let mut nodes = Vec::new();
-            for i in 0..tasks.len() {
-                nodes.push(graph.add_node(i));
-            }
-
-            for task in &tasks {
-                let task_idx = id_to_idx[&task.id];
-                for dep in &task.dependencies {
-                    if let Some(&dep_idx) = id_to_idx.get(dep) {
-                        graph.add_edge(nodes[dep_idx], nodes[task_idx], ());
-                    }
+        let mut initial_cache = HashMap::new();
+        for item in db.iter() {
+            let (k, v) = item.map_err(|e| anyhow!("Database read error: {}", e))?;
+            if let Ok(task_id) = String::from_utf8(k.to_vec()) {
+                if let Ok(result) = serde_json::from_slice(&v) {
+                    initial_cache.insert(task_id, result);
                 }
             }
+        }
 
-            let mut in_degree = vec![0usize; tasks.len()];
-            for i in 0..tasks.len() {
-                in_degree[i] = graph.edges_directed(nodes[i], Direction::Incoming).count();
-            }
-
-            let mut queue = VecDeque::new();
-            for i in 0..tasks.len() {
-                if in_degree[i] == 0 {
-                    queue.push_back(i);
-                }
-            }
-
-            let mut results = Vec::new();
-
-            while !queue.is_empty() {
-                let mut joinset = JoinSet::new();
-                let layer_size = queue.len();
-
-                for _ in 0..layer_size {
-                    let idx = queue.pop_front().unwrap();
-                    let task = tasks[idx].clone();
-                    let plugin_clone = plugin.clone();
-                    joinset.spawn(async move {
-                        eprintln!("Executing task: {} - {}", task.id, task.name);
-                        let params: serde_json::Value = serde_json::from_slice(&task.input)?;
-                        let result = plugin_clone.call(&task.name, params)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                        eprintln!("Task result: {}", result);
-                        Ok::<usize, anyhow::Error>(idx)
-                    });
-                }
-
-                while let Some(res) = joinset.join_next().await {
-                    match res {
-                        Ok(Ok(idx)) => {
-                            results.push(tasks[idx].id.clone());
-                            for neighbor in graph.neighbors_directed(nodes[idx], Direction::Outgoing) {
-                                let n_idx = *graph.node_weight(neighbor).unwrap();
-                                in_degree[n_idx] -= 1;
-                                if in_degree[n_idx] == 0 {
-                                    queue.push_back(n_idx);
-                                }
-                            }
-                        }
-                        Ok(Err(e)) => return Err(e),
-                        Err(e) => return Err(anyhow::anyhow!("Task panicked: {}", e)),
-                    }
-                }
-            }
-
-            Ok(results)
+        Ok(Self { 
+            plugin,
+            results_cache: Arc::new(Mutex::new(initial_cache)),
+            db,
+            _signing_key: signing_key,
         })
     }
 
-    fn status(&self, _task_id: &str) -> Pin<Box<dyn Future<Output = Option<TaskStatus>> + Send>> {
-        Box::pin(async { Some(TaskStatus::Completed) })
+    /// 🚀 核心新增：查询数据库结果
+    pub async fn get_result(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let result = self.db.get(id.as_bytes())?;
+        Ok(result.map(|ivec| ivec.to_vec()))
+    }
+
+    fn resolve_placeholders(val: &mut Value, cache: &HashMap<String, Value>) {
+        match val {
+            Value::String(s) => {
+                if s.contains("{{") && s.contains("}}") {
+                    let mut new_s = s.clone();
+                    for (task_id, result) in cache {
+                        if let Some(obj) = result.as_object() {
+                            for (key, res_val) in obj {
+                                let pattern = format!("{{{{ {}.{} }}}}", task_id, key);
+                                let replacement = match res_val {
+                                    Value::String(rs) => rs.clone(),
+                                    _ => res_val.to_string(),
+                                };
+                                new_s = new_s.replace(&pattern, &replacement);
+                            }
+                        }
+                    }
+                    *s = new_s;
+                }
+            }
+            Value::Object(map) => {
+                for (_, v) in map.iter_mut() {
+                    Self::resolve_placeholders(v, cache);
+                }
+            }
+            Value::Array(arr) => {
+                for v in arr.iter_mut() {
+                    Self::resolve_placeholders(v, cache);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn audit_privilege(task_name: &str, _params: &Value, token: &CapabilityToken) -> Result<()> {
+        if !token.allowed_methods.contains(task_name) {
+            return Err(anyhow!("🔥 Security Alert: Method [{}] unauthorized", task_name));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl WorkflowExecutor for ParallelExecutor {
+    async fn execute(&self, tasks: Vec<Task>) -> Result<Vec<String>> {
+        let plugin = self.plugin.clone();
+        let cache_clone = self.results_cache.clone();
+        let db_clone = self.db.clone();
+        
+        let mut id_to_idx = HashMap::new();
+        for (i, t) in tasks.iter().enumerate() { id_to_idx.insert(t.id.clone(), i); }
+
+        let mut graph = DiGraph::<usize, ()>::new();
+        let nodes: Vec<_> = (0..tasks.len()).map(|i| graph.add_node(i)).collect();
+
+        for task in &tasks {
+            let task_idx = id_to_idx[&task.id];
+            for dep in &task.dependencies {
+                if let Some(&dep_idx) = id_to_idx.get(dep) {
+                    graph.add_edge(nodes[dep_idx], nodes[task_idx], ());
+                }
+            }
+        }
+
+        let mut in_degree = vec![0usize; tasks.len()];
+        for i in 0..tasks.len() {
+            in_degree[i] = graph.edges_directed(nodes[i], Direction::Incoming).count();
+        }
+
+        let mut queue = VecDeque::new();
+        for i in 0..tasks.len() { if in_degree[i] == 0 { queue.push_back(i); } }
+
+        let mut final_results_ids = Vec::new();
+
+        while !queue.is_empty() {
+            let mut joinset = JoinSet::new();
+            let layer_size = queue.len();
+
+            for _ in 0..layer_size {
+                let idx = queue.pop_front().unwrap();
+                let task = tasks[idx].clone();
+                let plugin_clone = plugin.clone();
+                let task_cache = cache_clone.clone();
+                let db = db_clone.clone();
+                
+                joinset.spawn(async move {
+                    {
+                        let cache = task_cache.lock().await;
+                        if cache.contains_key(&task.id) {
+                            return Ok::<usize, anyhow::Error>(idx);
+                        }
+                    }
+
+                    let mut params: Value = serde_json::from_slice(&task.input)?;
+                    {
+                        let cache = task_cache.lock().await;
+                        Self::resolve_placeholders(&mut params, &cache);
+                    }
+
+                    if let Some(token) = &task.token {
+                        Self::audit_privilege(&task.name, &params, token)?;
+                    }
+
+                    let retry_strategy = ExponentialBuilder::default()
+                        .with_max_times(3)
+                        .with_min_delay(Duration::from_millis(500));
+
+                    let task_name = task.name.clone();
+                    let result = (|| async {
+                        plugin_clone.call(&task_name, params.clone()).await
+                            .map_err(|e| anyhow!("Extension Call Failed: {:?}", e))
+                    })
+                    .retry(&retry_strategy)
+                    .await?; 
+
+                    db.insert(task.id.as_bytes(), serde_json::to_vec(&result)?)?;
+                    db.flush()?; 
+
+                    {
+                        let mut cache = task_cache.lock().await;
+                        cache.insert(task.id.clone(), result);
+                    }
+
+                    Ok::<usize, anyhow::Error>(idx)
+                });
+            }
+
+            while let Some(res) = joinset.join_next().await {
+                match res {
+                    Ok(Ok(idx)) => {
+                        final_results_ids.push(tasks[idx].id.clone());
+                        for neighbor in graph.neighbors_directed(nodes[idx], Direction::Outgoing) {
+                            let n_idx = *graph.node_weight(neighbor).unwrap();
+                            in_degree[n_idx] -= 1;
+                            if in_degree[n_idx] == 0 { queue.push_back(n_idx); }
+                        }
+                    }
+                    Ok(Err(e)) => return Err(anyhow!("Workflow Execution Error: {}", e)),
+                    Err(e) => return Err(anyhow!("Task Panic: {:?}", e)),
+                }
+            }
+        }
+        Ok(final_results_ids)
+    }
+
+    async fn status(&self, _task_id: &str) -> Option<TaskStatus> {
+        Some(TaskStatus::Completed)
     }
 }
